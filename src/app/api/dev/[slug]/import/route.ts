@@ -7,11 +7,16 @@ export const maxDuration = 300;
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const body = (await req.json().catch(() => ({}))) as { mode?: string; bbox?: Bbox; ids?: string[] };
+  const body = (await req.json().catch(() => ({}))) as {
+    mode?: string;
+    bbox?: Bbox;
+    ids?: string[];
+    county?: string;
+  };
   try {
     if (body.mode === "ids") {
       if (!Array.isArray(body.ids) || body.ids.length === 0) return fail("ids required");
-      const res = await importByParcelIds(slug, body.ids);
+      const res = await importByParcelIds(slug, body.ids, body.county);
       return ok(res);
     }
     if (body.mode === "bbox") {

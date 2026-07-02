@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { fetchArcgisByBbox, parcelInfo, type Bbox } from "@/lib/arcgis";
+import { countyForBbox, fetchArcgisByBbox, parcelInfo, type Bbox } from "@/lib/arcgis";
 import { fail } from "@/lib/http";
 
 export const runtime = "nodejs";
@@ -15,7 +15,10 @@ export async function GET(req: Request) {
   if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return fail("bad bbox");
 
   try {
-    const feats = await fetchArcgisByBbox(parts as Bbox, 4);
+    // LIR parcels are per-county services; resolve which county this viewport
+    // is in, and stamp it on each feature so import can query the same layer.
+    const county = await countyForBbox(parts as Bbox);
+    const feats = await fetchArcgisByBbox(parts as Bbox, 4, county);
     const features: GeoJSON.Feature[] = feats.flatMap((f) => {
       const pid = (f.properties.PARCEL_ID as string) ?? "";
       if (!pid) return [];
@@ -37,6 +40,7 @@ export async function GET(req: Request) {
             subdivision: info.subdivision,
             built_yr: info.builtYr,
             bldg_sqft: info.bldgSqft,
+            county,
           },
         },
       ];

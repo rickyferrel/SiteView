@@ -323,7 +323,17 @@ export default function ParcelPicker({ slug, token, initialView }: Props) {
     setImporting(true);
     setError(null);
     try {
-      await jsend(`/api/dev/${slug}/import`, "POST", { mode: "ids", ids });
+      // PARCEL_IDs are only unique within a county, and each county has its own
+      // LIR service — group by the county each feature was fetched from so a
+      // selection near (or across) a county line imports from the right layer.
+      const byCounty = new Map<string, string[]>();
+      for (const id of ids) {
+        const county = (featuresRef.current.get(id)?.properties?.county as string | undefined) ?? "Utah";
+        byCounty.set(county, [...(byCounty.get(county) ?? []), id]);
+      }
+      for (const [county, group] of byCounty) {
+        await jsend(`/api/dev/${slug}/import`, "POST", { mode: "ids", ids: group, county });
+      }
       // Next step in the add-flow: frame the camera the public map opens on.
       router.push(devPath(slug, "opening-view"));
     } catch (e) {

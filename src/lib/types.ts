@@ -55,6 +55,33 @@ export function resolveMapStyle(devStyle: string, basemap: Basemap): string {
   return basemap === "custom" ? devStyle : BASEMAP_PRESETS[basemap];
 }
 
+// The hand-made Summit Creek lot tileset the DB was migrated from. The custom
+// Studio style still contains layers painting those lots (with their frozen
+// pre-migration colors), so every style consumer must hide them — otherwise a
+// lot removed in the portal appears to linger, painted by the basemap.
+export const LEGACY_LOT_TILESET = "tbelliston45.tw32i6178auc";
+
+export function hideLegacyLotLayers(map: {
+  getStyle(): unknown;
+  setLayoutProperty(layerId: string, name: string, value: string): void;
+}) {
+  const style = map.getStyle() as {
+    sources?: Record<string, { url?: string }>;
+    layers?: Array<{ id: string; source?: string }>;
+  } | null;
+  const legacySources = new Set(
+    Object.entries(style?.sources ?? {})
+      .filter(([id, s]) => id.includes(LEGACY_LOT_TILESET) || (s.url ?? "").includes(LEGACY_LOT_TILESET))
+      .map(([id]) => id)
+  );
+  if (!legacySources.size) return;
+  for (const layer of style?.layers ?? []) {
+    if (layer.source && legacySources.has(layer.source)) {
+      map.setLayoutProperty(layer.id, "visibility", "none");
+    }
+  }
+}
+
 export type Development = {
   id: string;
   slug: string;

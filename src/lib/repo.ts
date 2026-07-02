@@ -474,7 +474,8 @@ function geomCenter(g: GeoJSON.Geometry): [number, number] | null {
  */
 export async function importByParcelIds(
   slug: string,
-  ids: string[]
+  ids: string[],
+  county?: string
 ): Promise<{ imported: number }> {
   const dev = await getDevelopment(slug);
   if (!dev) throw new Error("development not found");
@@ -483,7 +484,7 @@ export async function importByParcelIds(
 
   const statuses = await getStatuses(dev.id);
   const defaultId = statuses.find((s) => s.is_default)?.id ?? null;
-  const feats = await fetchArcgisByParcelIds(uniq);
+  const feats = await fetchArcgisByParcelIds(uniq, county);
 
   let imported = 0;
   let cx = 0, cy = 0, cn = 0;
@@ -553,6 +554,10 @@ export async function updateParcel(
   if (!sets.length) return;
   vals.push(rowId);
   await query(`update parcels set ${sets.join(", ")}, updated_at = now() where id = $${i}`, vals);
+}
+
+export async function deleteParcel(rowId: string) {
+  await query("delete from parcels where id = $1", [rowId]);
 }
 
 export async function createStatus(devId: string, s: Partial<Status>) {

@@ -4,8 +4,9 @@
 
 Portal that is the **single source of truth** for 3D Mapbox parcel maps. The user edits
 lots/statuses/colors/fields here, previews, and publishes; the public 3D map embedded in
-their WordPress site (as one `<iframe>`) updates. Built as a working vertical slice for the
-**Summit Creek** development. Full design in [PLAN.md](PLAN.md); run/setup in [README.md](README.md).
+any customer site (as one `<iframe>` — WordPress or anywhere) updates. Built as a working
+vertical slice for the **Summit Creek** development, hosted on AWS (Amplify + RDS — see the
+Production section below). Full design in [PLAN.md](PLAN.md); run/setup in [README.md](README.md).
 
 ## Architecture (the one mental model)
 
@@ -37,12 +38,33 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   Turbopack **build** is fine. `npm run build && npm run start` is also stable.
 - **PGlite data dir must stay OUTSIDE the project tree** (defaults to OS temp via `PGLITE_DIR`).
   Inside the tree, the dev file-watcher floods and crashes the same way.
-- No local Postgres/Docker here: local dev uses **PGlite** (Postgres-in-WASM). For production,
-  swap `src/lib/db.ts` for a Supabase/`postgres` client with the same `query(text, params)`
-  signature — the SQL in `src/lib/schema.ts` is unchanged.
-- **Schema changes need a dev-server restart.** `SCHEMA_SQL` runs once at DB init, not on
-  hot-reload — after editing `schema.ts` (e.g. a new `alter table … add column if not exists`),
-  restart `npm run dev` or existing data dirs won't migrate (queries 500 on the missing column).
+- No local Postgres/Docker here: `src/lib/db.ts` is **env-aware** behind one `query(text, params)`
+  surface — real Postgres via `pg` when `DATABASE_URL` **or** `PGHOST` is set (prod/RDS), else
+  file-backed **PGlite** (Postgres-in-WASM) for local dev. **PGlite must stay lazily imported**
+  (never statically): a static import loads the WASM engine into the prod Lambda and OOMs it.
+- **Schema changes need a dev-server restart** — `SCHEMA_SQL` runs once at DB init, not on
+  hot-reload — **and a mirror edit in `migrate.sql`**, which duplicates `schema.ts` by hand for
+  prod (`npm run migrate` applies it to RDS). Editing one without the other silently forks
+  dev vs prod schemas.
+
+## Production (AWS)
+
+- **Hosting:** AWS Amplify app `SiteView` (`d1fccqopge5j62`, us-west-2) serving Next SSR from
+  GitHub `main` at `https://main.d1fccqopge5j62.amplifyapp.com`; DB is RDS Postgres
+  `map-portal-db` (TLS forced). Endpoints/creds/status live in [HANDOFF.md](HANDOFF.md);
+  click-by-click console steps in [AWS_SETUP_RUNBOOK.md](AWS_SETUP_RUNBOOK.md).
+- **Pushing to `main` deploys production** (Amplify auto-builds every push). Don't push
+  unverified work to `main`.
+- **Amplify env vars exist only at build time** — the SSR Lambda runtime never sees console
+  env vars. `scripts/write-env.mjs` (called from [amplify.yml](amplify.yml) before `next build`)
+  persists the `PG*`/server vars into `.env.production`, which the Next server loads at boot.
+  Without it, runtime `PGHOST` is undefined and db.ts silently falls back to PGlite → OOM.
+- **Env values are single-quoted with `$` escaped** in that file because Next's env loader
+  (dotenv-expand) expands `$WORD` inside values *even when quoted* — the stock AWS
+  `env | grep >> .env.production` pattern corrupts passwords. DB password is pasted verbatim
+  (never URL-encoded); it must not contain a single quote.
+- **Known gap: no auth.** Portal pages and all write APIs (`POST/PATCH/DELETE`) are publicly
+  reachable on the Amplify URL. Treat as pending work, not a design choice.
 
 ## Code map
 
@@ -58,6 +80,7 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
 | Parcel picker | `src/components/ParcelPicker.tsx` (add-a-development flow: pick parcels off satellite, hover card shows acres/value from LIR → `POST .../import`) |
 | Opening view | `src/components/OpeningViewEditor.tsx` (hand-frame the embed's opening camera → `PATCH/DELETE .../view`); a step in the add-flow (`d/[slug]/opening-view`) and a section in Map Design |
 | Types / shared | `src/lib/types.ts`, `src/lib/const.ts` (DEV_SLUG), `src/lib/client.ts`, `src/lib/http.ts` |
+| Deploy / infra | `amplify.yml` (build; runs `scripts/write-env.mjs`), `migrate.sql` + `scripts/migrate.mjs` (RDS schema), `HANDOFF.md` (live deploy status), `AWS_SETUP_RUNBOOK.md` |
 
 ## Conventions
 
@@ -77,13 +100,19 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   migrates real data (hits network), `POST .../publish` snapshots.
 - Visual: Playwright (installed) can screenshot `/embed/summit-creek` — launch chromium with
   `--use-angle=swiftshader` for WebGL, wait for `.mapboxgl-canvas` + ~9s for tiles/terrain.
+- Prod smoke check: `curl https://main.d1fccqopge5j62.amplifyapp.com/api/dev` → fast `200`
+  JSON array. A slow (~8s) empty-body 500 means the Lambda OOMed loading PGlite — i.e. the
+  runtime didn't get the `PG*` env vars (see Production section).
 
 ## External references
 
-Mapbox account `tbelliston45`; style `cmmv7xrgt002g01s6ef6l96o1`; lot tileset
-`tbelliston45.tw32i6178auc` (source-layer `0ad4a14650082dcc6f0e`). ArcGIS: `Parcels_Utah_LIR`
-FeatureServer/0 on `services1.arcgis.com/99lidPhWCzftIe9K` (UGRC/gis.utah.gov). LIR = the
+GitHub repo `rickyferrel/SiteView`. Mapbox account `tbelliston45`; style `cmmv7xrgt002g01s6ef6l96o1`; lot tileset
+`tbelliston45.tw32i6178auc` (source-layer `0ad4a14650082dcc6f0e`). ArcGIS: `Parcels_<County>_LIR`
+FeatureServer/0 services on `services1.arcgis.com/99lidPhWCzftIe9K` (UGRC/gis.utah.gov). LIR = the
 county assessor's "Land Information Records" parcels: same geometry + `PARCEL_ID` as the plain
 `Parcels_Utah` layer, but carries `PARCEL_ACRES`, `TOTAL_MKT_VALUE`/`LAND_MKT_VALUE`,
 `SUBDIV_NAME`, `PROP_CLASS`, `BUILT_YR`, `BLDG_SQFT` — so a picked parcel shows acres + value.
-It's per-county (this is Utah County) and omits `OWNERNAME`; other counties = `Parcels_<County>_LIR`.
+LIR is published per-county (29 services, identical schema) and omits `OWNERNAME`; `arcgis.ts`
+resolves the county from the viewport via `Utah_County_Boundaries` (`countyForBbox`), the picker
+stamps each parcel's `county`, and import queries that county's layer (default: Utah County).
+`PARCEL_ID` is only unique within a county.

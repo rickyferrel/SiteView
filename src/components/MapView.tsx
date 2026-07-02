@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import type { MapConfig, Status, Filter, FieldDef, DataState } from "@/lib/types";
-import { resolveMapStyle, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
+import { resolveMapStyle, hideLegacyLotLayers, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
 import { money, acres } from "@/lib/format";
 
 type Props = { slug: string; state: DataState; stop?: string };
@@ -161,6 +161,8 @@ export default function MapView({ slug, state, stop }: Props) {
 
       map.on("load", () => {
         if (!map) return;
+
+        hideLegacyLotLayers(map);
 
         // Stylized Mapbox Standard variants (e.g. "Clay") apply their config here.
         const standardCfg = STANDARD_CONFIG[appearance.basemap];

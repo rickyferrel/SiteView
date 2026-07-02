@@ -5,15 +5,39 @@ import "server-only";
 // user's existing lot data (status/lot#/price) from the live Mapbox tileset.
 // Everything joins on PARCEL_ID.
 //
-// We deliberately use the *LIR* ("Land Information Records") service rather than
+// We deliberately use the *LIR* ("Land Information Records") services rather than
 // the plain `Parcels_Utah` one: LIR carries the county assessor's data on the
 // same geometry and PARCEL_ID — acreage (PARCEL_ACRES), market value
 // (TOTAL_MKT_VALUE / LAND_MKT_VALUE), subdivision, property class, year built,
 // building sqft — so a picked parcel can show price + acres with no extra call.
-// Trade-off: LIR is per-county (this is Utah County) and omits OWNERNAME. For a
-// sales map that's a good trade; other counties get their own `Parcels_<County>_LIR`.
-const ARCGIS_QUERY =
-  "https://services1.arcgis.com/99lidPhWCzftIe9K/arcgis/rest/services/Parcels_Utah_LIR/FeatureServer/0/query";
+// Trade-off: LIR is published per-county (`Parcels_<County>_LIR`, identical field
+// schema across all 29) and omits OWNERNAME. For a sales map that's a good trade.
+// `countyForBbox` resolves which county layer a map location belongs to, so the
+// picker/import work anywhere in Utah, not just the seeded Utah County.
+const ARCGIS_HOST = "https://services1.arcgis.com/99lidPhWCzftIe9K/arcgis/rest/services";
+const lirQuery = (county: string) => `${ARCGIS_HOST}/Parcels_${county}_LIR/FeatureServer/0/query`;
+
+// Utah's 29 counties exactly as they appear in UGRC service names. Doubles as
+// validation so a bad/missing county can never build a URL to a 400ing service.
+const COUNTY_SERVICES = new Set([
+  "Beaver", "BoxElder", "Cache", "Carbon", "Daggett", "Davis", "Duchesne",
+  "Emery", "Garfield", "Grand", "Iron", "Juab", "Kane", "Millard", "Morgan",
+  "Piute", "Rich", "SaltLake", "SanJuan", "Sanpete", "Sevier", "Summit",
+  "Tooele", "Uintah", "Utah", "Wasatch", "Washington", "Wayne", "Weber",
+]);
+export const DEFAULT_COUNTY = "Utah"; // Utah County — where the seeded Summit Creek dev lives
+
+/** "SALT LAKE" / "salt lake" / "SaltLake" → "SaltLake"; unknown names → null. */
+export function normalizeCounty(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .split(/[\s_]+/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join("");
+  return COUNTY_SERVICES.has(slug) ? slug : null;
+}
 
 // Curated, normalized view of the assessor attributes we surface in the picker
 // and persist on import. Numbers come back as numbers from the LIR service;
@@ -68,13 +92,35 @@ async function getJson(url: string): Promise<Record<string, unknown>> {
   return (await res.json()) as Record<string, unknown>;
 }
 
-/** All parcels intersecting a bbox, following ArcGIS pagination. */
-export async function fetchArcgisByBbox(bbox: Bbox, maxPages = 30): Promise<ArcgisFeature[]> {
+/**
+ * Which county a bbox's center falls in, as a `Parcels_<County>_LIR` service
+ * slug. Falls back to Utah County if the lookup fails or the point is outside
+ * Utah entirely (query returns no feature).
+ */
+export async function countyForBbox(bbox: Bbox): Promise<string> {
+  const lng = (bbox[0] + bbox[2]) / 2;
+  const lat = (bbox[1] + bbox[3]) / 2;
+  const url =
+    `${ARCGIS_HOST}/Utah_County_Boundaries/FeatureServer/0/query?where=${encodeURIComponent("1=1")}` +
+    `&geometry=${lng},${lat}&geometryType=esriGeometryPoint&inSR=4326` +
+    `&spatialRel=esriSpatialRelIntersects&outFields=NAME&returnGeometry=false&f=json`;
+  try {
+    const g = await getJson(url);
+    const feats = g.features as { attributes?: { NAME?: string } }[] | undefined;
+    return normalizeCounty(feats?.[0]?.attributes?.NAME) ?? DEFAULT_COUNTY;
+  } catch {
+    return DEFAULT_COUNTY;
+  }
+}
+
+/** All parcels intersecting a bbox, following ArcGIS pagination. Resolves the county layer from the bbox unless given one. */
+export async function fetchArcgisByBbox(bbox: Bbox, maxPages = 30, county?: string): Promise<ArcgisFeature[]> {
+  const svc = normalizeCounty(county) ?? (await countyForBbox(bbox));
   const pageSize = 1000;
   const out: ArcgisFeature[] = [];
   for (let page = 0; page < maxPages; page++) {
     const url =
-      `${ARCGIS_QUERY}?where=${encodeURIComponent("1=1")}` +
+      `${lirQuery(svc)}?where=${encodeURIComponent("1=1")}` +
       `&geometry=${bbox.join(",")}&geometryType=esriGeometryEnvelope` +
       `&inSR=4326&outSR=4326&spatialRel=esriSpatialRelIntersects` +
       `&outFields=*&f=geojson&resultRecordCount=${pageSize}&resultOffset=${page * pageSize}`;
@@ -86,15 +132,16 @@ export async function fetchArcgisByBbox(bbox: Bbox, maxPages = 30): Promise<Arcg
   return out;
 }
 
-/** Geometry for an explicit set of PARCEL_IDs (chunked IN queries). */
-export async function fetchArcgisByParcelIds(ids: string[]): Promise<ArcgisFeature[]> {
+/** Geometry for an explicit set of PARCEL_IDs (chunked IN queries). PARCEL_IDs are county-scoped, so pass the county the ids came from. */
+export async function fetchArcgisByParcelIds(ids: string[], county?: string): Promise<ArcgisFeature[]> {
+  const svc = normalizeCounty(county) ?? DEFAULT_COUNTY;
   const out: ArcgisFeature[] = [];
   const chunk = 150;
   for (let i = 0; i < ids.length; i += chunk) {
     const slice = ids.slice(i, i + chunk);
     const inList = slice.map((id) => `'${id.replace(/'/g, "''")}'`).join(",");
     const url =
-      `${ARCGIS_QUERY}?where=${encodeURIComponent(`PARCEL_ID IN (${inList})`)}` +
+      `${lirQuery(svc)}?where=${encodeURIComponent(`PARCEL_ID IN (${inList})`)}` +
       `&outFields=*&outSR=4326&f=geojson&resultRecordCount=${chunk}`;
     const g = await getJson(url);
     out.push(...(((g.features as ArcgisFeature[] | undefined) ?? [])));

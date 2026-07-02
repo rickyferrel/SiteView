@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import type { MapConfig, Status, ViewState } from "@/lib/types";
-import { resolveMapStyle, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
+import { resolveMapStyle, hideLegacyLotLayers, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
 import { jsend } from "@/lib/client";
 import { cx } from "@/components/ui";
 
@@ -124,6 +124,8 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
 
       map.on("load", () => {
         if (!map) return;
+
+        hideLegacyLotLayers(map);
 
         const standardCfg = STANDARD_CONFIG[appearance.basemap];
         if (standardCfg) {

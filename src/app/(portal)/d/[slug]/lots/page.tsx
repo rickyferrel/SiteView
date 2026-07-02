@@ -29,6 +29,8 @@ export default function LotsPage() {
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState<Props | null>(null);
   const [saving, setSaving] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const [c, fc] = await Promise.all([
@@ -53,6 +55,18 @@ export default function LotsPage() {
     await jsend(`/api/parcel/${row.rowId}`, "PATCH", { patch: { status_id: id } });
     const color = config?.statuses.find((s) => s.name === name)?.color ?? null;
     setRows((rs) => (rs ?? []).map((r) => (r.rowId === row.rowId ? { ...r, status: name, status_color: color } : r)));
+  }
+
+  async function removeParcel(rowId: string) {
+    setRemoving(rowId);
+    try {
+      await jsend(`/api/parcel/${rowId}`, "DELETE");
+      setRows((rs) => (rs ?? []).filter((r) => r.rowId !== rowId));
+      setEditing((e) => (e?.rowId === rowId ? null : e));
+    } finally {
+      setRemoving(null);
+      setConfirmRemove(null);
+    }
   }
 
   const all = useMemo(() => rows ?? [], [rows]);
@@ -242,15 +256,40 @@ export default function LotsPage() {
                             </svg>
                           </div>
                         </td>
-                        <td className="py-2.5 pl-4 pr-5 text-right">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setEditing(r)}
-                            className="opacity-70 group-hover:opacity-100"
+                        <td className="py-2.5 pl-4 pr-5">
+                          <div
+                            className="flex items-center justify-end gap-1.5"
+                            onMouseLeave={() => setConfirmRemove((c) => (c === r.rowId ? null : c))}
                           >
-                            Edit
-                          </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setEditing(r)}
+                              className="opacity-70 group-hover:opacity-100"
+                            >
+                              Edit
+                            </Button>
+                            {confirmRemove === r.rowId ? (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={removing === r.rowId}
+                                onClick={() => removeParcel(String(r.rowId))}
+                                className="border-danger/40 bg-danger/5 text-danger-ink hover:border-danger/60 hover:bg-danger/10"
+                              >
+                                {removing === r.rowId ? "Removing…" : "Confirm"}
+                              </Button>
+                            ) : (
+                              <Button
+                                variant="subtle"
+                                size="sm"
+                                onClick={() => setConfirmRemove(String(r.rowId))}
+                                className="text-faint opacity-0 group-hover:opacity-70 hover:!opacity-100 hover:text-danger-ink"
+                              >
+                                Remove
+                              </Button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -268,6 +307,8 @@ export default function LotsPage() {
           fields={config.fields}
           statuses={config.statuses.map((s) => s.name)}
           saving={saving}
+          removing={removing === editing.rowId}
+          onDelete={() => removeParcel(String(editing.rowId))}
           onClose={() => setEditing(null)}
           onSave={async (patch, properties, statusName) => {
             setSaving(true);
@@ -308,17 +349,22 @@ function EditDrawer({
   fields,
   statuses,
   saving,
+  removing,
   onClose,
   onSave,
+  onDelete,
 }: {
   row: Props;
   fields: FieldDef[];
   statuses: string[];
   saving: boolean;
+  removing: boolean;
   onClose: () => void;
   onSave: (patch: Record<string, unknown>, properties: Record<string, unknown>, statusName?: string) => void;
+  onDelete: () => void;
 }) {
   const [form, setForm] = useState<Props>({ ...row });
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const set = (k: string, v: unknown) => setForm((f) => ({ ...f, [k]: v }));
 
   function save() {
@@ -435,10 +481,41 @@ function EditDrawer({
           )}
         </div>
 
-        <div className="border-t border-line-2 px-6 py-4">
-          <Button variant="primary" onClick={save} disabled={saving} className="w-full">
+        <div className="space-y-3 border-t border-line-2 px-6 py-4">
+          <Button variant="primary" onClick={save} disabled={saving || removing} className="w-full">
             {saving ? "Saving…" : "Save changes"}
           </Button>
+          {confirmingDelete ? (
+            <div className="flex items-center justify-between gap-3 rounded-[var(--radius-sm)] border border-danger/40 bg-danger/5 px-3.5 py-2.5">
+              <span className="text-[12.5px] leading-snug text-danger-ink">
+                Remove this lot from the map? Its status, price, and details are deleted with it.
+              </span>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Button variant="subtle" size="sm" onClick={() => setConfirmingDelete(false)} disabled={removing}>
+                  Keep
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onDelete}
+                  disabled={removing}
+                  className="border-danger/40 bg-danger/5 text-danger-ink hover:border-danger/60 hover:bg-danger/10"
+                >
+                  {removing ? "Removing…" : "Remove"}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center">
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(true)}
+                className="text-[13px] font-medium text-danger-ink transition hover:underline"
+              >
+                Remove lot from map
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
