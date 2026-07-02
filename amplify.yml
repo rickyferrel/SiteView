@@ -1,0 +1,22 @@
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        # Pin Node 24 — the app targets it and Amplify's default image may be older.
+        - nvm install 24
+        - nvm use 24
+        - npm ci
+    build:
+      commands:
+        - npm run build
+  artifacts:
+    # Amplify's Next.js SSR (WEB_COMPUTE) adapter reads .next; baseDirectory is
+    # the app root for a non-monorepo project.
+    baseDirectory: .next
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - node_modules/**/*
+      - .next/cache/**/*

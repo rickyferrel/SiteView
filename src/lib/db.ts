@@ -6,34 +6,67 @@ import { PGlite } from "@electric-sql/pglite";
 import { SCHEMA_SQL } from "./schema";
 import { seed } from "./seed";
 
-// File-backed PGlite (Postgres in WASM) for local dev — no external services.
-// In production, swap this module for a Supabase/Postgres client exposing the
-// same `query` signature; the SQL is identical.
+// Two backends behind one `query(text, params)` interface:
 //
-// IMPORTANT: keep the data dir OUTSIDE the project tree. PGlite writes many
-// files and the Next/Turbopack dev file-watcher chokes if it watches them.
+//   • Production: a real Postgres (AWS RDS) via `pg`, selected when DATABASE_URL
+//     is set. The schema/seed are applied out-of-band (see scripts/migrate.mjs
+//     and migrate.sql / the AWS runbook), so this path never runs DDL on a cold
+//     start — it just connects and queries.
+//   • Local dev: file-backed PGlite (Postgres in WASM), no external services.
+//     This path runs SCHEMA_SQL + seed() on first init.
+//
+// IMPORTANT (PGlite only): keep the data dir OUTSIDE the project tree. PGlite
+// writes many files and the Next/webpack dev file-watcher chokes if it watches
+// them.
 const DATA_DIR = process.env.PGLITE_DIR ?? join(tmpdir(), "map-portal-pgdata");
 
+// Shared query surface both backends implement.
+type Db = {
+  query<T>(text: string, params: unknown[]): Promise<{ rows: T[] }>;
+};
+
 type GlobalWithDb = typeof globalThis & {
-  __mapPortalDb?: Promise<PGlite>;
+  __mapPortalDb?: Promise<Db>;
 };
 const g = globalThis as GlobalWithDb;
 
-async function init(): Promise<PGlite> {
+const usePostgres = !!process.env.DATABASE_URL;
+
+async function initPostgres(): Promise<Db> {
+  // Import lazily so the pg native/optional deps never enter the PGlite path.
+  const { Pool } = await import("pg");
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    // RDS requires TLS (rds.force_ssl=1). We don't ship the RDS CA bundle, so we
+    // encrypt without verifying the chain — acceptable for a locked-down single
+    // tenant. Set PGSSL_REJECT_UNAUTHORIZED=1 (and provide a CA) to harden.
+    ssl: { rejectUnauthorized: process.env.PGSSL_REJECT_UNAUTHORIZED === "1" },
+    // Amplify SSR is Lambda-backed: keep the pool tiny so many warm containers
+    // don't exhaust the micro instance's connection limit.
+    max: Number(process.env.PGPOOL_MAX ?? 2),
+    idleTimeoutMillis: 30_000,
+  });
+  return {
+    query: <T>(text: string, params: unknown[]) =>
+      pool.query(text, params) as unknown as Promise<{ rows: T[] }>,
+  };
+}
+
+async function initPglite(): Promise<Db> {
   mkdirSync(DATA_DIR, { recursive: true });
   const db = new PGlite({ dataDir: DATA_DIR });
   await db.waitReady;
   await db.exec(SCHEMA_SQL);
   await seed(db);
-  return db;
+  return { query: (text, params) => db.query(text, params) };
 }
 
-// Memoize across HMR reloads so we don't reopen the data dir repeatedly.
-// On failure, clear the cache so the next request retries instead of reusing
-// a rejected promise.
-export function getDb(): Promise<PGlite> {
+// Memoize across HMR reloads / warm Lambda invocations so we don't reopen the
+// connection repeatedly. On failure, clear the cache so the next request retries
+// instead of reusing a rejected promise.
+function getDb(): Promise<Db> {
   if (!g.__mapPortalDb) {
-    g.__mapPortalDb = init().catch((e) => {
+    g.__mapPortalDb = (usePostgres ? initPostgres() : initPglite()).catch((e) => {
       g.__mapPortalDb = undefined;
       throw e;
     });
