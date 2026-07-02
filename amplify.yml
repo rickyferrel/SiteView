@@ -9,6 +9,11 @@ frontend:
         - npm ci
     build:
       commands:
+        # Amplify console env vars exist only at build time; persist the
+        # server-side ones into .env.production so the SSR (Lambda) runtime
+        # can read them. Without this, db.ts sees no PGHOST at runtime and
+        # falls back to PGlite → OOM.
+        - node scripts/write-env.mjs
         - npm run build
   artifacts:
     # Amplify's Next.js SSR (WEB_COMPUTE) adapter reads .next; baseDirectory is

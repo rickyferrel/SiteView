@@ -68,26 +68,36 @@ Key implementation facts:
 - ✅ Phase 4: **schema migrated to RDS** (all six tables live), verified by a real app-code
   connection over TLS. **Skip CloudShell.**
 - ✅ Phase 5: Amplify app created and deployed; atlas page renders.
-- 🔧 Phase 6: `/api/dev` returned 500 → diagnosed as `Runtime.OutOfMemory` (PGlite WASM loading in
-  the Lambda). **Fixed in `3ac5b35`.** Awaiting redeploy.
+- 🔧 Phase 6: `/api/dev` returned 500 → `Runtime.OutOfMemory` (PGlite WASM loading in the Lambda).
+  - Lazy-load fix `3ac5b35` deployed (verified live) but `/api/dev` **still 500s** with the same
+    slow OOM-shaped timing (~8–9 s), even with the `PG*` console vars set.
+  - **Root cause found (2026-07-01):** Amplify console env vars exist only at **build** time —
+    the SSR Lambda runtime never sees them. At runtime `PGHOST` is undefined, so `db.ts` takes
+    the local-dev branch and *deliberately* lazy-loads PGlite → OOM. The `3ac5b35` fix was
+    correct but couldn't matter.
+  - **Fix:** [scripts/write-env.mjs](scripts/write-env.mjs) (called from [amplify.yml](amplify.yml)
+    before `next build`) persists the server-side vars into `.env.production`, which the Next
+    server loads at boot. Values are single-quoted with `$` escaped — Next's env loader
+    (dotenv-expand) otherwise expands `$WORD` inside values (verified empirically; the naive
+    `env | grep >> .env.production` pattern from AWS docs would corrupt this password).
+    Round-trip tested locally against the real `@next/env`. Awaiting commit + push + rebuild.
+  - **Do NOT bump SSR compute memory** — at 2 GB the PGlite path could *succeed*, silently
+    serving an ephemeral throwaway DB from the Lambda instead of RDS.
 
 ---
 
 ## 5. Immediate next steps (Claude Chrome)
 
-1. **Set discrete DB env vars** in Amplify (Hosting → Environment variables), removing URL ambiguity:
-   - `PGHOST=map-portal-db.chu640iaq0jy.us-west-2.rds.amazonaws.com`
-   - `PGPORT=5432`
-   - `PGUSER=postgres`
-   - `PGDATABASE=mapportal`
-   - `PGPASSWORD=` the password **verbatim** from Secrets Manager (entered in console, not chat)
-   - **Delete `DATABASE_URL`** (if both exist, the URL wins).
-   - Keep `NEXT_PUBLIC_MAPBOX_TOKEN`.
-2. **Redeploy the head of `main`** — must build commit `3ac5b35` or later (the OOM fix) AND apply
-   the new env. Not "redeploy this version" if that re-runs the old commit.
-3. **Re-test** `https://main.d1fccqopge5j62.amplifyapp.com/api/dev` → expect **HTTP 200 `[]`**.
-   Check the new REPORT log's `Max Memory Used` — should be well under 1024 MB.
-4. Only if it still OOMs: bump Amplify SSR compute memory (unlikely now).
+Console env vars are already set correctly (keep them — the build now copies them into the
+runtime). After the `write-env` commit is pushed, Amplify auto-builds `main`. Then:
+
+1. **Watch the new build** (Amplify → the app → `main` branch). In the build log, confirm the
+   line `write-env: persisted N var(s) to .env.production: PGHOST, ...` appears before
+   `npm run build`.
+2. **Re-test** `https://main.d1fccqopge5j62.amplifyapp.com/api/dev` → expect **HTTP 200 `[]`**,
+   fast (<1 s warm). If a REPORT log is handy, `Max Memory Used` should now be far under 1024 MB.
+3. If it *still* 500s, capture the actual Lambda error log line — it is now a real DB/network
+   error (auth, security group, TLS), **not** memory. Do not bump SSR compute memory (see §4).
 
 ## 6. After the app is green
 
