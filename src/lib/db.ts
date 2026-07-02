@@ -2,9 +2,11 @@ import "server-only";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PGlite } from "@electric-sql/pglite";
 import { SCHEMA_SQL } from "./schema";
 import { seed } from "./seed";
+// NOTE: PGlite is imported lazily inside initPglite() — never statically. It
+// ships a large WASM Postgres engine; a static import would load that into the
+// production Lambda (which uses `pg`, not PGlite) and OOM the SSR compute.
 
 // Two backends behind one `query(text, params)` interface:
 //
@@ -62,6 +64,8 @@ async function initPostgres(): Promise<Db> {
 }
 
 async function initPglite(): Promise<Db> {
+  // Lazy import so the WASM engine only loads on the local dev path.
+  const { PGlite } = await import("@electric-sql/pglite");
   mkdirSync(DATA_DIR, { recursive: true });
   const db = new PGlite({ dataDir: DATA_DIR });
   await db.waitReady;
