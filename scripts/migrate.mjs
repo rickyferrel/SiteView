@@ -5,10 +5,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import pg from "pg";
+import { pgConfigFromEnv } from "./pg-config.mjs";
 
-const url = process.env.DATABASE_URL;
-if (!url) {
-  console.error("DATABASE_URL is not set. Refusing to run.");
+if (!process.env.DATABASE_URL && !process.env.PGHOST) {
+  console.error("DATABASE_URL (or PGHOST/PGPASSWORD/…) is not set. Refusing to run.");
   process.exit(1);
 }
 
@@ -17,10 +17,7 @@ const sql = readFileSync(
   "utf8"
 );
 
-const client = new pg.Client({
-  connectionString: url,
-  ssl: { rejectUnauthorized: process.env.PGSSL_REJECT_UNAUTHORIZED === "1" },
-});
+const client = new pg.Client(pgConfigFromEnv());
 
 try {
   await client.connect();

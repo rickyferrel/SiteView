@@ -183,6 +183,9 @@ cannot reach a private-subnet RDS. The mitigation already applied: public endpoi
      - 🔶 **HUMAN / secure:** fetch `<PASSWORD>` from Secrets Manager and paste it directly into the
        Amplify env-var field in the console — **do not** route it through chat. `<ENDPOINT>` is the
        Phase 1 value. `src/lib/db.ts` uses this single connection string (not discrete PG* vars).
+     - **Paste the password verbatim, even if it has special characters** (`@ : / ? # %` …). The app
+       parses the password literally, so **no URL-encoding is needed**. (Amplify passes env vars
+       directly, unlike a local `.env` file — so special chars are safe here.)
    - `NEXT_PUBLIC_MAPBOX_TOKEN` = the public `pk.` Mapbox token. **Required** — without it the map
      does not render and new-development prefill is blank. (This is a publishable token; it ships to
      the browser by design.)

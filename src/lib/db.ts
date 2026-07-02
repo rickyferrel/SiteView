@@ -30,22 +30,31 @@ type GlobalWithDb = typeof globalThis & {
 };
 const g = globalThis as GlobalWithDb;
 
-const usePostgres = !!process.env.DATABASE_URL;
+const usePostgres = !!(process.env.DATABASE_URL || process.env.PGHOST);
+
+// Build a pg config that tolerates passwords with URL-reserved characters
+// (@ : / ? # % …), which would otherwise break connectionString parsing. We
+// split DATABASE_URL manually and pass the password as a literal field.
+function pgConfig() {
+  // RDS requires TLS (rds.force_ssl=1). We don't ship the RDS CA bundle, so we
+  // encrypt without verifying the chain — acceptable for a locked-down single
+  // tenant. Set PGSSL_REJECT_UNAUTHORIZED=1 (and provide a CA) to harden.
+  const ssl = { rejectUnauthorized: process.env.PGSSL_REJECT_UNAUTHORIZED === "1" };
+  // Amplify SSR is Lambda-backed: keep the pool tiny so many warm containers
+  // don't exhaust the micro instance's connection limit.
+  const max = Number(process.env.PGPOOL_MAX ?? 2);
+  const url = process.env.DATABASE_URL?.trim().replace(/^['"]|['"]$/g, "");
+  if (!url) return { ssl, max, idleTimeoutMillis: 30_000 }; // fall back to PG* env vars
+  const m = url.match(/^postgres(?:ql)?:\/\/([^:@]+):(.*)@([^:/?]+)(?::(\d+))?\/([^?]+)/i);
+  if (!m) throw new Error("DATABASE_URL is not in postgres://user:password@host:port/database form");
+  const [, user, password, host, port, database] = m;
+  return { user, password, host, port: port ? Number(port) : 5432, database, ssl, max, idleTimeoutMillis: 30_000 };
+}
 
 async function initPostgres(): Promise<Db> {
   // Import lazily so the pg native/optional deps never enter the PGlite path.
   const { Pool } = await import("pg");
-  const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    // RDS requires TLS (rds.force_ssl=1). We don't ship the RDS CA bundle, so we
-    // encrypt without verifying the chain — acceptable for a locked-down single
-    // tenant. Set PGSSL_REJECT_UNAUTHORIZED=1 (and provide a CA) to harden.
-    ssl: { rejectUnauthorized: process.env.PGSSL_REJECT_UNAUTHORIZED === "1" },
-    // Amplify SSR is Lambda-backed: keep the pool tiny so many warm containers
-    // don't exhaust the micro instance's connection limit.
-    max: Number(process.env.PGPOOL_MAX ?? 2),
-    idleTimeoutMillis: 30_000,
-  });
+  const pool = new Pool(pgConfig());
   return {
     query: <T>(text: string, params: unknown[]) =>
       pool.query(text, params) as unknown as Promise<{ rows: T[] }>,
