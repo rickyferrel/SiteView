@@ -36,6 +36,7 @@ export default function PreviewPage() {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: true; count: number } | { ok: false; error: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
   const [name, setName] = useState("");
   const [count, setCount] = useState<number | null>(null);
   const [publishedAt, setPublishedAt] = useState<string | null>(null);
@@ -55,9 +56,21 @@ export default function PreviewPage() {
     load().catch((e) => setResult({ ok: false, error: String(e) }));
   }, [load]);
 
+  // The draft tab gets edit=1: the embed's lot panel grows a Remove-lot tool.
+  // Deletions inside the iframe post `sc:parcel-deleted` back up; reload the
+  // readouts so "Lots in draft" tracks what the operator just did.
+  useEffect(() => {
+    function onMessage(e: MessageEvent) {
+      if (e.origin !== window.location.origin) return;
+      if ((e.data as { type?: string } | null)?.type === "sc:parcel-deleted") load().catch(() => {});
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [load]);
+
   const loaded = count !== null;
   const empty = count === 0;
-  const src = tab === "draft" ? `/embed/${slug}?state=draft&_=${nonce}` : `/embed/${slug}?_=${nonce}`;
+  const src = tab === "draft" ? `/embed/${slug}?state=draft&edit=1&_=${nonce}` : `/embed/${slug}?_=${nonce}`;
 
   // Deploy status. Without a backend-provided draft-vs-published diff count we
   // can only distinguish "never published" from "published"; treat any published
@@ -95,6 +108,16 @@ export default function PreviewPage() {
     navigator.clipboard?.writeText(snippet);
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
+  }
+
+  // Shareable customer preview: a standalone, view-only page with no way back
+  // into the portal. Reads the draft, so it always shows the latest work.
+  const previewUrl = `${origin || "https://your-portal-domain.com"}/preview/${slug}`;
+
+  function copyPreviewLink() {
+    navigator.clipboard?.writeText(previewUrl);
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 1600);
   }
 
   return (
@@ -250,6 +273,34 @@ export default function PreviewPage() {
             )}
           </div>
         )}
+      </section>
+
+      {/* Customer preview link — a polished, view-only page safe to send out. */}
+      <section className="card overflow-hidden">
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line-2 px-5 py-3.5">
+          <div>
+            <h2 className="eyebrow !text-graphite">Customer preview link</h2>
+            <p className="mt-1 max-w-xl text-[13px] text-faint">
+              Send this to a customer to show off the map. It&apos;s a polished, view-only page — just the map with your
+              development&apos;s name on it, no way into this portal. It always shows your current draft.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <a href={previewUrl} target="_blank" rel="noreferrer">
+              <Button variant="ghost" size="sm">
+                Open preview
+              </Button>
+            </a>
+            <Button variant="primary" size="sm" onClick={copyPreviewLink}>
+              {linkCopied ? "Link copied" : "Copy link"}
+            </Button>
+          </div>
+        </header>
+        <div className="p-5">
+          <div className="contour-whisper flex items-center justify-between gap-3 overflow-x-auto rounded-[var(--radius)] border border-white/[0.06] bg-stage px-4 py-3">
+            <span className="whitespace-nowrap font-mono text-[12px] leading-relaxed text-white/85">{previewUrl}</span>
+          </div>
+        </div>
       </section>
 
       {/* The handoff artifact — paste once into WordPress, controlled here forever. */}

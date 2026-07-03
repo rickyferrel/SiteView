@@ -17,5 +17,8 @@ export default async function EmbedPage({
   // WordPress loads the bare URL → published. Portal preview adds ?state=draft.
   const state: DataState = sp.state === "draft" ? "draft" : "published";
   const stop = typeof sp.stop === "string" ? sp.stop : undefined;
-  return <MapView slug={slug} state={state} stop={stop} />;
+  // ribbon=0 hides the draft ribbon (customer-facing /preview/{slug} page).
+  // edit=1 (portal Preview & Publish draft iframe only) enables the lot panel's
+  // Remove-lot tool; MapView ignores it on published data.
+  return <MapView slug={slug} state={state} stop={stop} ribbon={sp.ribbon !== "0"} edit={sp.edit === "1"} />;
 }

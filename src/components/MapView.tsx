@@ -9,7 +9,11 @@ import { money, acres } from "@/lib/format";
 import { videoEmbed, isHttpUrl, type VideoEmbed } from "@/lib/video";
 import VideoPreview from "@/components/VideoPreview";
 
-type Props = { slug: string; state: DataState; stop?: string };
+// `ribbon: false` hides the draft-workflow ribbon — used by the customer-facing
+// /preview/{slug} page, which shows draft data but must not leak operator language.
+// `edit: true` adds operator tools (Remove lot) to the lot panel; only the portal's
+// Preview & Publish draft iframe sends it, and it is ignored unless state is "draft".
+type Props = { slug: string; state: DataState; stop?: string; ribbon?: boolean; edit?: boolean };
 
 type Props_ = Record<string, unknown>;
 
@@ -73,9 +77,10 @@ function lotClusterBounds(fc: GeoJSON.FeatureCollection): mapboxgl.LngLatBounds 
   return b.isEmpty() ? null : b;
 }
 
-export default function MapView({ slug, state, stop }: Props) {
+export default function MapView({ slug, state, stop, ribbon = true, edit = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
+  const fcRef = useRef<GeoJSON.FeatureCollection | null>(null);
   const [config, setConfig] = useState<MapConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Props_ | null>(null);
@@ -99,6 +104,7 @@ export default function MapView({ slug, state, stop }: Props) {
       const fc = (await pRes.json()) as GeoJSON.FeatureCollection;
       if (cancelled || !containerRef.current) return;
       setConfig(cfg);
+      fcRef.current = fc;
 
       mapboxgl.accessToken = cfg.development.mapbox_token;
       const view = cfg.development.stop_views[stop ?? ""] ?? cfg.development.default_view;
@@ -276,6 +282,30 @@ export default function MapView({ slug, state, stop }: Props) {
     }
   }
 
+  // Draft-only operator action: delete the lot row, drop its polygon from the
+  // live source, and tell the framing portal page so its counts stay honest.
+  async function removeLot(rowId: string) {
+    const res = await fetch(`/api/parcel/${rowId}`, { method: "DELETE" });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(body?.error ?? `Remove failed (HTTP ${res.status})`);
+    }
+    const fc = fcRef.current;
+    const map = mapRef.current;
+    if (fc && map) {
+      const next: GeoJSON.FeatureCollection = {
+        ...fc,
+        features: fc.features.filter((f) => String((f.properties as Props_ | null)?.rowId) !== rowId),
+      };
+      fcRef.current = next;
+      (map.getSource("parcels") as mapboxgl.GeoJSONSource | undefined)?.setData(next);
+    }
+    closePanel();
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: "sc:parcel-deleted", rowId }, window.location.origin);
+    }
+  }
+
   if (error) {
     return (
       <div className="sc-map-wrap" style={{ display: "grid", placeItems: "center", background: "#0c0f16", color: "#fff" }}>
@@ -327,9 +357,18 @@ export default function MapView({ slug, state, stop }: Props) {
         <strong>To rotate the map: hold Ctrl + drag</strong>
       </div>
 
-      {state === "draft" && <div className="sc-draft-ribbon">Draft preview · not yet published</div>}
+      {state === "draft" && ribbon && <div className="sc-draft-ribbon">Draft preview · not yet published</div>}
 
-      {selected && config && <LotPanel props={selected} fields={config.fields} statuses={config.statuses} onClose={closePanel} />}
+      {selected && config && (
+        <LotPanel
+          key={String(selected.parcel_id ?? "")}
+          props={selected}
+          fields={config.fields}
+          statuses={config.statuses}
+          onClose={closePanel}
+          onDelete={edit && state === "draft" && selected.rowId != null ? () => removeLot(String(selected.rowId)) : undefined}
+        />
+      )}
     </div>
   );
 }
@@ -339,12 +378,30 @@ function LotPanel({
   fields,
   statuses,
   onClose,
+  onDelete,
 }: {
   props: Props_;
   fields: FieldDef[];
   statuses: Status[];
   onClose: () => void;
+  onDelete?: () => Promise<void>;
 }) {
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
+  async function handleRemove() {
+    if (!onDelete || removing) return;
+    setRemoving(true);
+    setRemoveError(null);
+    try {
+      await onDelete(); // success closes the panel from the parent
+    } catch (e) {
+      setRemoveError(e instanceof Error ? e.message : String(e));
+      setRemoving(false);
+    }
+  }
+
   const get = (k: string) => (props[k] == null ? "" : String(props[k]));
   const statusName = get("status");
   const status = statuses.find((s) => s.name === statusName);
@@ -420,6 +477,28 @@ function LotPanel({
           <a className="sc-lot-link" href={link} target="_blank" rel="noopener noreferrer">
             View lot details
           </a>
+        )}
+        {onDelete && (
+          <div className="sc-remove-zone">
+            <div className="sc-remove-note">Removes this lot from the draft map. The live map changes when you publish.</div>
+            <div className="sc-remove-actions">
+              {confirmRemove ? (
+                <>
+                  <button className="sc-remove-btn confirm" disabled={removing} onClick={handleRemove}>
+                    {removing ? "Removing…" : "Confirm removal"}
+                  </button>
+                  <button className="sc-remove-btn quiet" disabled={removing} onClick={() => setConfirmRemove(false)}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button className="sc-remove-btn" onClick={() => setConfirmRemove(true)}>
+                  Remove lot
+                </button>
+              )}
+            </div>
+            {removeError && <div className="sc-remove-error">{removeError}</div>}
+          </div>
         )}
       </div>
     </>

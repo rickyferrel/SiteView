@@ -273,6 +273,68 @@
   outline-offset: 2px;
 }
 
+/* DRAFT EDIT — operator-only Remove-lot action in the lot panel.
+   Rendered only when the portal preview iframe passes edit=1 on draft data. */
+.sc-remove-zone {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #eaeef4;
+}
+.sc-remove-note {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #8a92a3;
+  margin-bottom: 10px;
+}
+.sc-remove-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sc-remove-btn {
+  border: 1px solid #e0c9c6;
+  background: #fff;
+  color: #8c3b3b;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 14px;
+  border-radius: var(--sc-radius-sm);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.sc-remove-btn:hover {
+  background: rgba(140, 59, 59, 0.06);
+  border-color: #cfa39e;
+}
+.sc-remove-btn:focus-visible {
+  outline: 2px solid #0d1320;
+  outline-offset: 2px;
+}
+.sc-remove-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.sc-remove-btn.confirm {
+  background: rgba(140, 59, 59, 0.09);
+  border-color: rgba(140, 59, 59, 0.55);
+}
+.sc-remove-btn.confirm:hover {
+  background: rgba(140, 59, 59, 0.14);
+}
+.sc-remove-btn.quiet {
+  border-color: #e1e6ee;
+  color: #5b6377;
+}
+.sc-remove-btn.quiet:hover {
+  background: #eef1f6;
+  border-color: #d6dce6;
+}
+.sc-remove-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #8c3b3b;
+}
+
 /* DRAFT / PREVIEW ribbon — a mono survey marker, not a filled brass pill.
    Brass appears only as a small leading tick, keeping the data colors dominant. */
 .sc-draft-ribbon {
