@@ -7,6 +7,9 @@ import type { NextConfig } from "next";
 const frameAncestors = process.env.EMBED_FRAME_ANCESTORS?.trim();
 
 const nextConfig: NextConfig = {
+  // Hide the dev-only "N" devtools badge — it floats over the map/preview
+  // surfaces (twice, once per iframe). Compile/runtime errors still surface.
+  devIndicators: false,
   // PGlite ships WASM assets; keep it external so the bundler doesn't mangle it.
   serverExternalPackages: ["@electric-sql/pglite"],
   // Pin the workspace root (a stray lockfile in $HOME otherwise confuses Turbopack).
