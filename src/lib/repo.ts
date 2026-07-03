@@ -10,6 +10,7 @@ import {
   SUMMIT_CREEK_BBOX,
   type Bbox,
 } from "./arcgis";
+import { normalizeGeoJSON } from "./geojson";
 import type {
   Development,
   DevelopmentInput,
@@ -511,14 +512,57 @@ export async function importByParcelIds(
 
   // First real import on a still-statewide camera → frame the new cluster.
   // Never override a view the operator has framed by hand.
-  if (cn > 0 && !dev.view_locked && dev.default_view.zoom < 12) {
-    const view: ViewState = { center: [cx / cn, cy / cn], zoom: 15.6, pitch: 62, bearing: 0 };
-    await query("update developments set default_view = $1::jsonb where id = $2", [
-      JSON.stringify(view),
-      dev.id,
-    ]);
-  }
+  if (cn > 0) await frameClusterIfUnset(dev, [cx / cn, cy / cn]);
   return { imported };
+}
+
+// Recenter the opening camera onto a freshly imported cluster — but only while
+// the view is still the statewide default and the operator hasn't locked one.
+async function frameClusterIfUnset(dev: Development, center: [number, number]) {
+  if (dev.view_locked || dev.default_view.zoom >= 12) return;
+  const view: ViewState = { center, zoom: 15.6, pitch: 62, bearing: 0 };
+  await query("update developments set default_view = $1::jsonb where id = $2", [
+    JSON.stringify(view),
+    dev.id,
+  ]);
+}
+
+/**
+ * Import operator-supplied GeoJSON (exported from GIS/CAD tooling) instead of
+ * county records. The payload is re-normalized server-side — polygons only,
+ * WGS84 enforced, parcel IDs derived from feature properties — so the API is
+ * safe to hit directly. Uses the same upsert as county imports: re-uploading a
+ * file refreshes geometry without clobbering lot edits.
+ */
+export async function importGeoJSON(
+  slug: string,
+  input: unknown
+): Promise<{ imported: number; skipped: number; warnings: string[] }> {
+  const dev = await getDevelopment(slug);
+  if (!dev) throw new Error("development not found");
+  const { parcels, skipped, warnings } = normalizeGeoJSON(input);
+
+  const statuses = await getStatuses(dev.id);
+  const defaultId = statuses.find((s) => s.is_default)?.id ?? null;
+
+  let cx = 0, cy = 0, cn = 0;
+  for (const p of parcels) {
+    await upsertParcel(dev.id, p.parcel_id, p.geometry, null, p.properties, {
+      status_id: defaultId,
+      ...p.lot,
+      image_url: null,
+      video_url: null,
+      lot_page_url: null,
+    }, false);
+    const c = geomCenter(p.geometry);
+    if (c) {
+      cx += c[0];
+      cy += c[1];
+      cn++;
+    }
+  }
+  if (cn > 0) await frameClusterIfUnset(dev, [cx / cn, cy / cn]);
+  return { imported: parcels.length, skipped, warnings };
 }
 
 // ---- Mutations --------------------------------------------------------------
