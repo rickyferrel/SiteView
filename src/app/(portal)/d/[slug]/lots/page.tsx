@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { devPath } from "@/lib/const";
 import { jget, jsend } from "@/lib/client";
 import { money } from "@/lib/format";
+import { videoEmbed } from "@/lib/video";
 import type { MapConfig, FieldDef, Status } from "@/lib/types";
 import {
   PageHeader,
@@ -344,6 +345,37 @@ function DrawerGroup({ label, children }: { label: string; children: React.React
   );
 }
 
+/* ---- Live preview under the Video URL input, so a pasted link shows the
+   actual player (matching what the embed panel will render) instead of raw text. */
+function VideoUrlPreview({ url }: { url: string }) {
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  const embed = videoEmbed(trimmed);
+  if (!embed) {
+    return (
+      <p className="mt-2 text-[12.5px] leading-snug text-faint">
+        Couldn’t recognize this as a playable video. Use a YouTube, Vimeo, Loom, or Google Drive
+        link, or a direct video file (.mp4, .webm, .mov).
+      </p>
+    );
+  }
+  return (
+    <div className="relative mt-2 aspect-video w-full overflow-hidden rounded-[var(--radius-sm)] border border-line bg-ink/90">
+      {embed.kind === "file" ? (
+        <video src={embed.src} controls playsInline preload="metadata" className="absolute inset-0 h-full w-full object-contain" />
+      ) : (
+        <iframe
+          src={embed.src}
+          title="Video preview"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          allowFullScreen
+          className="absolute inset-0 h-full w-full border-0"
+        />
+      )}
+    </div>
+  );
+}
+
 function EditDrawer({
   row,
   fields,
@@ -439,6 +471,7 @@ function EditDrawer({
             </Field>
             <Field label="Video URL">
               <TextInput value={form.video_url} onChange={(v) => set("video_url", v)} />
+              <VideoUrlPreview url={String(form.video_url ?? "")} />
             </Field>
             <Field label="Lot page URL">
               <TextInput value={form.lot_page_url} onChange={(v) => set("lot_page_url", v)} />

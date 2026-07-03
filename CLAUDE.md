@@ -75,6 +75,7 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
 | Repo (reads/writes, import, publish) | `src/lib/repo.ts` (`createDevelopment`/`updateDevelopment`/`deleteDevelopment` for the CRUD flow) |
 | API routes | `src/app/api/dev` (GET list, POST create), `src/app/api/dev/[slug]` (GET row, PATCH rename/re-point, DELETE cascade), `src/app/api/dev/[slug]/{config,parcels,import,publish,statuses,fields,filters,appearance,view}`, `src/app/api/{parcel,status,field,filter}/[id]` |
 | Embed map | `src/app/embed/[slug]/page.tsx`, `src/components/MapView.tsx`, `src/app/embed/embed.css` |
+| Video previews | `src/lib/video.ts` (`videoEmbed()`: pasted URL → iframe/`<video>` embed; YouTube/Vimeo/Loom/Drive/direct files). Used by the lot panel in `MapView.tsx` (core `video_url` **and** custom fields holding a video URL; other URL-valued fields render as links) and as a live preview under the Video URL input in the lots edit drawer |
 | Portal UI | `src/app/(portal)/{page,new}` (root `page` is the **atlas** — the multi-site index of every development) + `src/app/(portal)/d/[slug]/{page,lots,design,preview,parcels,opening-view}` + `src/components/PortalNav.tsx` |
 | Developments CRUD | atlas index `src/app/(portal)/page.tsx`, edit/delete in `src/components/DevSettingsModals.tsx` on the shared `src/components/Modal.tsx` shell (Escape/backdrop close, focus trap) |
 | Parcel picker | `src/components/ParcelPicker.tsx` (add-a-development flow: pick parcels off satellite, hover card shows acres/value from LIR → `POST .../import`) |

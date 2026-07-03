@@ -6,6 +6,7 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import type { MapConfig, Status, Filter, FieldDef, DataState } from "@/lib/types";
 import { resolveMapStyle, hideLegacyLotLayers, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
 import { money, acres } from "@/lib/format";
+import { videoEmbed, isHttpUrl, type VideoEmbed } from "@/lib/video";
 
 type Props = { slug: string; state: DataState; stop?: string };
 
@@ -26,24 +27,21 @@ function fillColorExpr(statuses: Status[]) {
   return expr;
 }
 
-function ytEmbed(url?: string | null): string {
-  if (!url) return "";
-  try {
-    const u = new URL(url);
-    if (u.hostname.includes("youtu.be")) {
-      const id = u.pathname.replace("/", "");
-      return id ? `https://www.youtube.com/embed/${id}` : "";
-    }
-    if (u.hostname.includes("youtube.com")) {
-      const id = u.searchParams.get("v");
-      if (id) return `https://www.youtube.com/embed/${id}`;
-      const m = u.pathname.match(/\/shorts\/([^/]+)/);
-      if (m?.[1]) return `https://www.youtube.com/embed/${m[1]}`;
-    }
-  } catch {
-    /* ignore */
-  }
-  return "";
+function VideoPreview({ embed, title }: { embed: VideoEmbed; title: string }) {
+  return (
+    <div className="sc-video-wrap">
+      {embed.kind === "file" ? (
+        <video src={embed.src} controls playsInline preload="metadata" />
+      ) : (
+        <iframe
+          src={embed.src}
+          title={title}
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+          allowFullScreen
+        />
+      )}
+    </div>
+  );
 }
 
 function eachVertex(f: GeoJSON.Feature, fn: (pt: [number, number]) => void) {
@@ -358,12 +356,17 @@ function LotPanel({
   const get = (k: string) => (props[k] == null ? "" : String(props[k]));
   const statusName = get("status");
   const status = statuses.find((s) => s.name === statusName);
-  const embed = ytEmbed(get("video_url"));
+  const embed = videoEmbed(get("video_url"));
   const price = money(get("list_price"));
   const ac = acres(get("parcel_acres"));
   const img = get("image_url");
   const link = get("lot_page_url");
-  const panelFields = fields.filter((f) => f.show_in_panel && get(f.key));
+  const allPanelFields = fields.filter((f) => f.show_in_panel && get(f.key));
+  // Fields holding a playable video URL become previews instead of raw-URL text.
+  const videoFields = allPanelFields
+    .map((f) => ({ field: f, embed: videoEmbed(get(f.key)) }))
+    .filter((v): v is { field: FieldDef; embed: VideoEmbed } => v.embed !== null);
+  const panelFields = allPanelFields.filter((f) => !videoFields.some((v) => v.field.key === f.key));
 
   return (
     <>
@@ -380,11 +383,10 @@ function LotPanel({
         )}
         <h2 className="sc-lot-title">{get("lot_number") ? `Lot ${get("lot_number")}` : "Parcel"}</h2>
         {get("property_address") && <div className="sc-lot-address">{get("property_address")}</div>}
-        {embed && (
-          <div className="sc-video-wrap">
-            <iframe src={embed} title="Lot video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen />
-          </div>
-        )}
+        {embed && <VideoPreview embed={embed} title="Lot video" />}
+        {videoFields.map((v) => (
+          <VideoPreview key={v.field.key} embed={v.embed} title={v.field.label} />
+        ))}
         {img && (
           <div className="sc-image-wrap">
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -409,7 +411,16 @@ function LotPanel({
           )}
           {panelFields.map((f) => (
             <div key={f.key}>
-              <strong>{f.label}:</strong> {f.type === "money" ? money(get(f.key)) : get(f.key)}
+              <strong>{f.label}:</strong>{" "}
+              {f.type === "money" ? (
+                money(get(f.key))
+              ) : isHttpUrl(get(f.key)) ? (
+                <a href={get(f.key)} target="_blank" rel="noopener noreferrer" className="sc-meta-link">
+                  View
+                </a>
+              ) : (
+                get(f.key)
+              )}
             </div>
           ))}
         </div>
