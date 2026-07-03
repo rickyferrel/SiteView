@@ -6,6 +6,7 @@ import { devPath } from "@/lib/const";
 import { jget, jsend } from "@/lib/client";
 import { money } from "@/lib/format";
 import { videoEmbed } from "@/lib/video";
+import VideoPreview from "@/components/VideoPreview";
 import type { MapConfig, FieldDef, Status } from "@/lib/types";
 import {
   PageHeader,
@@ -361,17 +362,7 @@ function VideoUrlPreview({ url }: { url: string }) {
   }
   return (
     <div className="relative mt-2 aspect-video w-full overflow-hidden rounded-[var(--radius-sm)] border border-line bg-ink/90">
-      {embed.kind === "file" ? (
-        <video src={embed.src} controls playsInline preload="metadata" className="absolute inset-0 h-full w-full object-contain" />
-      ) : (
-        <iframe
-          src={embed.src}
-          title="Video preview"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-          allowFullScreen
-          className="absolute inset-0 h-full w-full border-0"
-        />
-      )}
+      <VideoPreview embed={embed} title="Video preview" />
     </div>
   );
 }

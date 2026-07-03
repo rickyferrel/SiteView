@@ -1,6 +1,17 @@
 // Turn a pasted video URL into something previewable. Providers get an iframe
 // embed URL; direct video files play in a native <video> element.
-export type VideoEmbed = { kind: "iframe" | "file"; src: string };
+export type VideoProvider = "youtube" | "vimeo" | "loom" | "drive" | "file";
+
+export type VideoEmbed = {
+  kind: "iframe" | "file";
+  provider: VideoProvider;
+  /** Embed/player URL. */
+  src: string;
+  /** Poster image, when derivable without an API call. */
+  thumbnail?: string;
+  /** The video's page on the provider — where the play button links to. */
+  watchUrl: string;
+};
 
 const FILE_EXT = /\.(mp4|webm|ogv|ogg|mov|m4v)(\?|#|$)/i;
 
@@ -27,27 +38,60 @@ export function videoEmbed(url?: string | null): VideoEmbed | null {
       const i = parts[0] === "video" ? 1 : 0;
       const id = parts[i];
       if (!id || !/^\d+$/.test(id)) return null;
-      const hash = parts[i + 1] && /^[0-9a-f]+$/i.test(parts[i + 1]) ? `?h=${parts[i + 1]}` : "";
-      return { kind: "iframe", src: `https://player.vimeo.com/video/${id}${hash}` };
+      const hash = parts[i + 1] && /^[0-9a-f]+$/i.test(parts[i + 1]) ? parts[i + 1] : null;
+      const src = `https://player.vimeo.com/video/${id}${hash ? `?h=${hash}` : ""}`;
+      return {
+        kind: "iframe",
+        provider: "vimeo",
+        src,
+        watchUrl: `https://vimeo.com/${id}${hash ? `/${hash}` : ""}`,
+      };
     }
     if (host === "loom.com" || host.endsWith(".loom.com")) {
       const m = u.pathname.match(/\/(?:share|embed)\/([0-9a-f]+)/i);
-      return m?.[1] ? { kind: "iframe", src: `https://www.loom.com/embed/${m[1]}` } : null;
+      if (!m?.[1]) return null;
+      const src = `https://www.loom.com/embed/${m[1]}`;
+      return {
+        kind: "iframe",
+        provider: "loom",
+        src,
+        watchUrl: `https://www.loom.com/share/${m[1]}`,
+      };
     }
     if (host === "drive.google.com") {
       const m = u.pathname.match(/\/file\/d\/([^/]+)/);
-      return m?.[1] ? { kind: "iframe", src: `https://drive.google.com/file/d/${m[1]}/preview` } : null;
+      if (!m?.[1]) return null;
+      const src = `https://drive.google.com/file/d/${m[1]}/preview`;
+      return { kind: "iframe", provider: "drive", src, watchUrl: `https://drive.google.com/file/d/${m[1]}/view` };
     }
-    if (FILE_EXT.test(u.pathname)) return { kind: "file", src: u.toString() };
+    if (FILE_EXT.test(u.pathname)) {
+      const s = u.toString();
+      return { kind: "file", provider: "file", src: s, watchUrl: s };
+    }
   } catch {
     /* not a URL */
   }
   return null;
 }
 
-function yt(id: string): VideoEmbed {
-  return { kind: "iframe", src: `https://www.youtube.com/embed/${encodeURIComponent(id)}` };
+function yt(rawId: string): VideoEmbed {
+  const id = encodeURIComponent(rawId);
+  return {
+    kind: "iframe",
+    provider: "youtube",
+    src: `https://www.youtube.com/embed/${id}`,
+    thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+    watchUrl: `https://www.youtube.com/watch?v=${id}`,
+  };
 }
+
+export const PROVIDER_LABEL: Record<VideoProvider, string> = {
+  youtube: "YouTube",
+  vimeo: "Vimeo",
+  loom: "Loom",
+  drive: "Google Drive",
+  file: "video",
+};
 
 export function isHttpUrl(v: string): boolean {
   return /^https?:\/\/\S+$/i.test(v.trim());

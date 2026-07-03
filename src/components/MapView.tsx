@@ -7,6 +7,7 @@ import type { MapConfig, Status, Filter, FieldDef, DataState } from "@/lib/types
 import { resolveMapStyle, hideLegacyLotLayers, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
 import { money, acres } from "@/lib/format";
 import { videoEmbed, isHttpUrl, type VideoEmbed } from "@/lib/video";
+import VideoPreview from "@/components/VideoPreview";
 
 type Props = { slug: string; state: DataState; stop?: string };
 
@@ -27,19 +28,10 @@ function fillColorExpr(statuses: Status[]) {
   return expr;
 }
 
-function VideoPreview({ embed, title }: { embed: VideoEmbed; title: string }) {
+function PanelVideo({ embed, title }: { embed: VideoEmbed; title: string }) {
   return (
     <div className="sc-video-wrap">
-      {embed.kind === "file" ? (
-        <video src={embed.src} controls playsInline preload="metadata" />
-      ) : (
-        <iframe
-          src={embed.src}
-          title={title}
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-          allowFullScreen
-        />
-      )}
+      <VideoPreview embed={embed} title={title} />
     </div>
   );
 }
@@ -383,9 +375,9 @@ function LotPanel({
         )}
         <h2 className="sc-lot-title">{get("lot_number") ? `Lot ${get("lot_number")}` : "Parcel"}</h2>
         {get("property_address") && <div className="sc-lot-address">{get("property_address")}</div>}
-        {embed && <VideoPreview embed={embed} title="Lot video" />}
+        {embed && <PanelVideo embed={embed} title="Lot video" />}
         {videoFields.map((v) => (
-          <VideoPreview key={v.field.key} embed={v.embed} title={v.field.label} />
+          <PanelVideo key={v.field.key} embed={v.embed} title={v.field.label} />
         ))}
         {img && (
           <div className="sc-image-wrap">
