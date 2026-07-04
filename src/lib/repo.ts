@@ -565,6 +565,123 @@ export async function importGeoJSON(
   return { imported: parcels.length, skipped, warnings };
 }
 
+// ---- CSV enrich ---------------------------------------------------------------
+
+export type CsvUpdate = {
+  rowId: string;
+  /** Whitelisted core columns → new value (already conflict-resolved client-side). */
+  core?: Record<string, string>;
+  /** Status by name — resolved to status_id here (case-insensitive). */
+  statusName?: string;
+  /** Custom-field values merged into the parcel's properties jsonb. */
+  properties?: Record<string, unknown>;
+};
+
+export type CsvImportPayload = {
+  newFields?: Array<{ key: string; label: string; type: string; options?: string[] | null }>;
+  newStatuses?: string[];
+  updates: CsvUpdate[];
+};
+
+const CSV_CORE = [
+  "lot_number",
+  "property_address",
+  "list_price",
+  "parcel_acres",
+  "image_url",
+  "video_url",
+  "lot_page_url",
+] as const;
+
+// Colors handed to statuses a CSV import creates — distinct from the seeded
+// palette so they're recognizable; the operator refines them in Map Design.
+const CSV_STATUS_COLORS = ["#4a6d8c", "#7a5c8c", "#8c6f4a", "#5e8c8a", "#8c5e4a", "#6b7280"];
+
+/**
+ * Apply a CSV lot-enrichment plan the wizard prepared: create any new custom
+ * fields and statuses first, then patch each matched parcel — core columns via
+ * whitelist, custom values merged into `properties` (never replacing keys the
+ * CSV didn't touch). The client decides overwrite-vs-fill-blank per cell, so
+ * this just applies exactly what was previewed. Re-running is safe: field/
+ * status creates skip existing names, updates are idempotent.
+ */
+export async function applyCsvImport(
+  slug: string,
+  payload: CsvImportPayload
+): Promise<{ updated: number; fieldsCreated: number; statusesCreated: number }> {
+  const dev = await getDevelopment(slug);
+  if (!dev) throw new Error("development not found");
+
+  const existingFields = await getFields(dev.id);
+  const fieldKeys = new Set(existingFields.map((f) => f.key));
+  let fieldsCreated = 0;
+  let fsort = Math.max(0, ...existingFields.map((f) => f.sort_order));
+  for (const f of payload.newFields ?? []) {
+    if (!f?.key || fieldKeys.has(f.key)) continue;
+    await createField(dev.id, {
+      key: f.key,
+      label: f.label || f.key,
+      type: (f.type as FieldDef["type"]) ?? "text",
+      options: f.options ?? null,
+      sort_order: ++fsort,
+    });
+    fieldKeys.add(f.key);
+    fieldsCreated++;
+  }
+
+  const statuses = await getStatuses(dev.id);
+  const statusByName = new Map(statuses.map((s) => [s.name.toLowerCase(), s.id]));
+  let statusesCreated = 0;
+  let ssort = Math.max(0, ...statuses.map((s) => s.sort_order));
+  for (const name of payload.newStatuses ?? []) {
+    const k = String(name ?? "").trim().toLowerCase();
+    if (!k || statusByName.has(k)) continue;
+    const id = await createStatus(dev.id, {
+      name: String(name).trim(),
+      color: CSV_STATUS_COLORS[statusesCreated % CSV_STATUS_COLORS.length],
+      sort_order: ++ssort,
+    });
+    statusByName.set(k, id);
+    statusesCreated++;
+  }
+
+  let updated = 0;
+  for (const u of payload.updates ?? []) {
+    if (!u?.rowId) continue;
+    const sets: string[] = [];
+    const vals: unknown[] = [];
+    let i = 1;
+    for (const k of CSV_CORE) {
+      const v = u.core?.[k];
+      if (typeof v === "string") {
+        sets.push(`${k} = $${i++}`);
+        vals.push(v);
+      }
+    }
+    if (u.statusName !== undefined) {
+      const sid = statusByName.get(String(u.statusName).trim().toLowerCase());
+      if (sid) {
+        sets.push(`status_id = $${i++}`);
+        vals.push(sid);
+      }
+    }
+    if (u.properties && Object.keys(u.properties).length > 0) {
+      sets.push(`properties = properties || $${i++}::jsonb`);
+      vals.push(JSON.stringify(u.properties));
+    }
+    if (!sets.length) continue;
+    vals.push(u.rowId, dev.id);
+    const rows = await query<{ id: string }>(
+      `update parcels set ${sets.join(", ")}, updated_at = now()
+        where id = $${i} and development_id = $${i + 1} returning id`,
+      vals
+    );
+    if (rows.length > 0) updated++;
+  }
+
+  return { updated, fieldsCreated, statusesCreated };
+}
+
 // ---- Mutations --------------------------------------------------------------
 
 const PARCEL_FIELDS = new Set([

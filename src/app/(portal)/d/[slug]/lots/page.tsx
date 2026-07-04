@@ -7,6 +7,7 @@ import { jget, jsend } from "@/lib/client";
 import { money } from "@/lib/format";
 import { videoEmbed } from "@/lib/video";
 import VideoPreview from "@/components/VideoPreview";
+import CsvImport from "@/components/CsvImport";
 import type { MapConfig, FieldDef, Status } from "@/lib/types";
 import {
   PageHeader,
@@ -33,6 +34,7 @@ export default function LotsPage() {
   const [saving, setSaving] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [csvOpen, setCsvOpen] = useState(false);
 
   const load = useCallback(async () => {
     const [c, fc] = await Promise.all([
@@ -117,7 +119,14 @@ export default function LotsPage() {
         eyebrow={`Inventory · ${config?.development.name ?? "…"}`}
         title="Lots"
         description="Click a status to change it instantly, or open a lot to edit its details."
-        actions={search}
+        actions={
+          <div className="flex items-center gap-2">
+            {search}
+            <Button variant="ghost" size="sm" onClick={() => setCsvOpen(true)} disabled={loading}>
+              Import CSV
+            </Button>
+          </div>
+        }
       />
 
       {/* Per-status tally strip — a scannable gauge of inventory state. */}
@@ -302,6 +311,18 @@ export default function LotsPage() {
           )}
         </div>
       </Section>
+
+      {csvOpen && config && rows && (
+        <CsvImport
+          slug={slug}
+          config={config}
+          lots={rows}
+          onClose={() => setCsvOpen(false)}
+          onDone={() => {
+            load().catch(console.error);
+          }}
+        />
+      )}
 
       {editing && config && (
         <EditDrawer

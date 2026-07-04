@@ -1,4 +1,5 @@
-import { importSummitCreek, importByBbox, importByParcelIds, importGeoJSON } from "@/lib/repo";
+import { importSummitCreek, importByBbox, importByParcelIds, importGeoJSON, applyCsvImport } from "@/lib/repo";
+import type { CsvImportPayload } from "@/lib/repo";
 import { ok, fail } from "@/lib/http";
 import type { Bbox } from "@/lib/arcgis";
 
@@ -13,8 +14,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     ids?: string[];
     county?: string;
     geojson?: unknown;
+    csv?: CsvImportPayload;
   };
   try {
+    if (body.mode === "csv") {
+      if (!body.csv || !Array.isArray(body.csv.updates)) return fail("csv payload required");
+      const res = await applyCsvImport(slug, body.csv);
+      return ok(res);
+    }
     if (body.mode === "geojson") {
       if (!body.geojson) return fail("geojson required");
       const res = await importGeoJSON(slug, body.geojson);
