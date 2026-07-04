@@ -99,13 +99,22 @@ export default function PortalNav() {
    "create a development" flow. This is the seam where multi-site becomes real. */
 function ClientSwitcher({ activeSlug }: { activeSlug: string | null }) {
   const router = useRouter();
+  const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [devs, setDevs] = useState<DevelopmentSummary[] | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
+  // The nav lives in the layout and never remounts, so lot counts go stale the
+  // moment an import lands. Refetch on every route change and on popover open.
   useEffect(() => {
-    jget<DevelopmentSummary[]>("/api/dev").then(setDevs).catch(() => setDevs([]));
-  }, []);
+    let alive = true;
+    jget<DevelopmentSummary[]>("/api/dev")
+      .then((d) => alive && setDevs(d))
+      .catch(() => alive && setDevs((prev) => prev ?? []));
+    return () => {
+      alive = false;
+    };
+  }, [pathname, open]);
 
   useEffect(() => {
     if (!open) return;
