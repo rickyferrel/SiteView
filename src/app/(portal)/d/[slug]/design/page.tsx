@@ -12,7 +12,6 @@ import {
   Button,
   Eyebrow,
   Field,
-  Dot,
   Chip,
   SaveState,
   EmptyState,
@@ -328,6 +327,66 @@ function DeleteButton({ onClick, label }: { onClick: () => void; label: string }
   );
 }
 
+/* ---- Status color: visible swatch + hex that opens the native picker ----- */
+
+function StatusColor({ color, onCommit }: { color: string; onCommit: (c: string) => void }) {
+  const [val, setVal] = useState(color);
+  const committed = useRef(color);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Adopt server changes, but not the echo of our own commit — that would
+  // clobber a pick still in progress.
+  useEffect(() => {
+    if (color !== committed.current) {
+      committed.current = color;
+      setVal(color);
+    }
+  }, [color]);
+
+  function commit(c: string) {
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+    if (c !== committed.current) {
+      committed.current = c;
+      onCommit(c);
+    }
+  }
+
+  return (
+    <label
+      title="Change color"
+      className={cx(
+        "relative inline-flex h-8 shrink-0 cursor-pointer items-center gap-2 rounded-[var(--radius-sm)] border border-line bg-panel px-2 transition",
+        "hover:border-[color:var(--color-panel-3)] hover:bg-panel-2",
+        "focus-within:ring-2 focus-within:ring-ink/15"
+      )}
+    >
+      <span
+        className="inline-block h-4 w-4 shrink-0 rounded-full ring-1 ring-inset ring-black/10"
+        style={{ background: val }}
+      />
+      <span className="font-mono text-[11px] tracking-[0.04em] text-graphite tabular-nums">
+        {val.toUpperCase()}
+      </span>
+      <input
+        type="color"
+        value={val}
+        onChange={(e) => {
+          const c = e.target.value;
+          setVal(c);
+          if (timer.current) clearTimeout(timer.current);
+          timer.current = setTimeout(() => commit(c), 500);
+        }}
+        onBlur={(e) => commit(e.target.value)}
+        className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+        aria-label="Status color"
+      />
+    </label>
+  );
+}
+
 /* ---- Statuses ------------------------------------------------------------ */
 
 function Statuses({
@@ -350,7 +409,7 @@ function Statuses({
   return (
     <Section
       title="Statuses & colors"
-      hint="Each status paints the map's fill-color. The default colors any lot that doesn't match another, and can't be deleted."
+      hint="Each status paints the map's fill-color — click a swatch to change it. The default colors any lot that doesn't match another, and can't be deleted."
       action={
         <div className="flex items-center gap-3">
           <SaveState state={save.state} at={save.at} />
@@ -401,23 +460,15 @@ function Statuses({
               key={s.id}
               className="flex flex-wrap items-center gap-3 rounded-[var(--radius-sm)] border border-line bg-panel px-3 py-2.5 transition hover:border-[color:var(--color-panel-3)]"
             >
-              {/* Color is the identity: a swatch input dressed as the status dot */}
-              <label className="relative inline-flex shrink-0 cursor-pointer items-center" title="Status color">
-                <Dot color={s.color} size={16} />
-                <input
-                  type="color"
-                  defaultValue={s.color}
-                  onBlur={(e) =>
-                    e.target.value !== s.color &&
-                    mutate(async () => {
-                      await jsend(`/api/status/${s.id}`, "PATCH", { color: e.target.value });
-                      await reload();
-                    })
-                  }
-                  className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                  aria-label="Status color"
-                />
-              </label>
+              <StatusColor
+                color={s.color}
+                onCommit={(c) =>
+                  mutate(async () => {
+                    await jsend(`/api/status/${s.id}`, "PATCH", { color: c });
+                    await reload();
+                  })
+                }
+              />
               <input
                 defaultValue={s.name}
                 onBlur={(e) =>
@@ -430,9 +481,6 @@ function Statuses({
                 className={fieldClass("!h-8 min-w-[10rem] flex-1 font-medium")}
                 aria-label="Status name"
               />
-              <Chip tone="data" style={{ color: s.color, borderColor: s.color }}>
-                {s.color.toUpperCase()}
-              </Chip>
               <label className="flex items-center gap-1.5 text-[13px] text-graphite">
                 <input
                   type="checkbox"
