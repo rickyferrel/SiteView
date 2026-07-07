@@ -27,7 +27,8 @@ alter table developments
   add column if not exists view_locked boolean not null default false;
 
 -- Customer preview link: the /preview/{slug}?k={token} page only answers to
--- this token, and only until it expires (7 days from mint). Null = never minted.
+-- this token, and only until it expires (7 days from mint or reset).
+-- Null = never minted.
 alter table developments
   add column if not exists preview_token text;
 alter table developments

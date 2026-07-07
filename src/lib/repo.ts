@@ -169,7 +169,8 @@ export async function deleteDevelopment(slug: string): Promise<boolean> {
 // ---- Customer preview link ---------------------------------------------------
 // The shareable /preview/{slug} page only answers to a token minted here, and
 // only for 7 days. Minting replaces the previous token, so a regenerated link
-// immediately kills every copy of the old one.
+// immediately kills every copy of the old one. Renewing keeps the token and
+// only restarts its clock.
 
 export type PreviewLink = { token: string; expires_at: string };
 
@@ -200,6 +201,19 @@ export async function mintPreviewLink(devId: string): Promise<PreviewLink> {
     [token, expires_at, devId]
   );
   return { token, expires_at };
+}
+
+/** Reset the 7-day clock while keeping the existing preview URL alive. */
+export async function renewPreviewLink(devId: string): Promise<PreviewLink> {
+  const link = await getPreviewLink(devId);
+  if (!link) return mintPreviewLink(devId);
+
+  const expires_at = new Date(Date.now() + PREVIEW_LINK_TTL_MS).toISOString();
+  await query(
+    "update developments set preview_expires_at = $1 where id = $2",
+    [expires_at, devId]
+  );
+  return { token: link.token, expires_at };
 }
 
 export async function updateAppearance(devId: string, appearance: MapAppearance) {
