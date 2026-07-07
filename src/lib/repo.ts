@@ -1,5 +1,5 @@
 import "server-only";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { query, queryOne } from "./db";
 import {
   fetchArcgisByBbox,
@@ -164,6 +164,42 @@ export async function deleteDevelopment(slug: string): Promise<boolean> {
   if (!dev) return false;
   await query("delete from developments where id = $1", [dev.id]);
   return true;
+}
+
+// ---- Customer preview link ---------------------------------------------------
+// The shareable /preview/{slug} page only answers to a token minted here, and
+// only for 7 days. Minting replaces the previous token, so a regenerated link
+// immediately kills every copy of the old one.
+
+export type PreviewLink = { token: string; expires_at: string };
+
+const PREVIEW_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The stored preview link, if any — may already be past its expiry. */
+export async function getPreviewLink(devId: string): Promise<PreviewLink | null> {
+  const row = await queryOne<{ preview_token: unknown; preview_expires_at: unknown }>(
+    "select preview_token, preview_expires_at from developments where id = $1",
+    [devId]
+  );
+  if (!row?.preview_token || !row.preview_expires_at) return null;
+  const expires = new Date(row.preview_expires_at as string | Date);
+  if (Number.isNaN(expires.getTime())) return null;
+  return { token: String(row.preview_token), expires_at: expires.toISOString() };
+}
+
+export function previewLinkIsLive(link: PreviewLink | null): link is PreviewLink {
+  return !!link && new Date(link.expires_at).getTime() > Date.now();
+}
+
+/** Issue a fresh 7-day preview token, replacing (and killing) any prior link. */
+export async function mintPreviewLink(devId: string): Promise<PreviewLink> {
+  const token = randomBytes(9).toString("base64url");
+  const expires_at = new Date(Date.now() + PREVIEW_LINK_TTL_MS).toISOString();
+  await query(
+    "update developments set preview_token = $1, preview_expires_at = $2 where id = $3",
+    [token, expires_at, devId]
+  );
+  return { token, expires_at };
 }
 
 export async function updateAppearance(devId: string, appearance: MapAppearance) {

@@ -12,6 +12,17 @@ import { PageHeader, Card, Button, Eyebrow, Readout, EmptyState, Logomark, cx } 
 const PUBLISH_CTA =
   "px-6 shadow-[0_1px_0_rgba(255,255,255,0.18)_inset,0_1px_2px_rgba(122,96,52,0.45)]";
 
+// Future-tense counterpart to relativeTime, for the preview link's 7-day clock.
+function expiresIn(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return "expired";
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `in ${mins} min`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 48) return `in ${hrs} hr`;
+  return `in ${Math.round(hrs / 24)} days`;
+}
+
 function relativeTime(iso: string): string {
   const then = new Date(iso).getTime();
   const secs = Math.round((Date.now() - then) / 1000);
@@ -40,20 +51,28 @@ export default function PreviewPage() {
   const [name, setName] = useState("");
   const [count, setCount] = useState<number | null>(null);
   const [publishedAt, setPublishedAt] = useState<string | null>(null);
+  const [previewLink, setPreviewLink] = useState<{ token: string; expires_at: string } | null>(null);
+  const [regenBusy, setRegenBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const [c, fc] = await Promise.all([
+    const [c, fc, pl] = await Promise.all([
       jget<MapConfig>(`/api/dev/${slug}/config?state=draft`),
       jget<GeoJSON.FeatureCollection>(`/api/dev/${slug}/parcels?state=draft`),
+      // Mints a fresh 7-day token if none exists or the last one lapsed.
+      jget<{ token: string; expires_at: string }>(`/api/dev/${slug}/preview-link`),
     ]);
     setName(c.development.name);
     setCount(fc.features.length);
     setPublishedAt(c.published_at);
+    setPreviewLink(pl);
   }, [slug]);
 
   useEffect(() => {
-    setOrigin(window.location.origin);
-    load().catch((e) => setResult({ ok: false, error: String(e) }));
+    const id = window.setTimeout(() => {
+      setOrigin(window.location.origin);
+      load().catch((e) => setResult({ ok: false, error: String(e) }));
+    }, 0);
+    return () => window.clearTimeout(id);
   }, [load]);
 
   // The draft tab gets edit=1: the embed's lot panel grows a Remove-lot tool.
@@ -111,13 +130,30 @@ export default function PreviewPage() {
   }
 
   // Shareable customer preview: a standalone, view-only page with no way back
-  // into the portal. Reads the draft, so it always shows the latest work.
-  const previewUrl = `${origin || "https://your-portal-domain.com"}/preview/${slug}`;
+  // into the portal. Reads the draft, so it always shows the latest work. The
+  // token gates it to 7 days; regenerating kills every copy of the old link.
+  const previewUrl = previewLink
+    ? `${origin || "https://your-portal-domain.com"}/preview/${slug}?k=${previewLink.token}`
+    : null;
 
   function copyPreviewLink() {
+    if (!previewUrl) return;
     navigator.clipboard?.writeText(previewUrl);
     setLinkCopied(true);
     setTimeout(() => setLinkCopied(false), 1600);
+  }
+
+  async function regeneratePreviewLink() {
+    setRegenBusy(true);
+    try {
+      const pl = await jsend<{ token: string; expires_at: string }>(`/api/dev/${slug}/preview-link`, "POST", {});
+      setPreviewLink(pl);
+      setLinkCopied(false);
+    } catch {
+      // Leave the current link in place; the next page load retries via load().
+    } finally {
+      setRegenBusy(false);
+    }
   }
 
   return (
@@ -282,23 +318,58 @@ export default function PreviewPage() {
             <h2 className="eyebrow !text-graphite">Customer preview link</h2>
             <p className="mt-1 max-w-xl text-[13px] text-faint">
               Send this to a customer to show off the map. It&apos;s a polished, view-only page — just the map with your
-              development&apos;s name on it, no way into this portal. It always shows your current draft.
+              development&apos;s name on it, no way into this portal. It always shows your current draft, and the link
+              stays live for 7 days.
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <a href={previewUrl} target="_blank" rel="noreferrer">
-              <Button variant="ghost" size="sm">
+            {previewUrl ? (
+              <a href={previewUrl} target="_blank" rel="noreferrer">
+                <Button variant="ghost" size="sm">
+                  Open preview
+                </Button>
+              </a>
+            ) : (
+              <Button variant="ghost" size="sm" disabled>
                 Open preview
               </Button>
-            </a>
-            <Button variant="primary" size="sm" onClick={copyPreviewLink}>
+            )}
+            <Button variant="primary" size="sm" onClick={copyPreviewLink} disabled={!previewUrl}>
               {linkCopied ? "Link copied" : "Copy link"}
             </Button>
           </div>
         </header>
-        <div className="p-5">
+        <div className="space-y-3 p-5">
           <div className="contour-whisper flex items-center justify-between gap-3 overflow-x-auto rounded-[var(--radius)] border border-white/[0.06] bg-stage px-4 py-3">
-            <span className="whitespace-nowrap font-mono text-[12px] leading-relaxed text-white/85">{previewUrl}</span>
+            <span className="whitespace-nowrap font-mono text-[12px] leading-relaxed text-white/85">
+              {previewUrl ?? "Preparing link…"}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            <span className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.12em] text-graphite">
+              {previewLink ? (
+                <>
+                  <span className="h-2 w-2 shrink-0 rounded-full bg-brass ring-1 ring-inset ring-black/10" />
+                  Live · expires{" "}
+                  {new Date(previewLink.expires_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })} ·{" "}
+                  {expiresIn(previewLink.expires_at)}
+                </>
+              ) : (
+                <>
+                  <span className="h-2 w-2 shrink-0 rounded-full bg-panel-3" />
+                  Checking link…
+                </>
+              )}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={regeneratePreviewLink}
+              disabled={regenBusy || !previewLink}
+              title="Issues a fresh 7-day link. Any copy of the current link stops working."
+            >
+              {regenBusy ? "Issuing…" : "New link"}
+            </Button>
           </div>
         </div>
       </section>

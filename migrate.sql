@@ -22,6 +22,11 @@ alter table developments
 alter table developments
   add column if not exists view_locked boolean not null default false;
 
+alter table developments
+  add column if not exists preview_token text;
+alter table developments
+  add column if not exists preview_expires_at timestamptz;
+
 create table if not exists statuses (
   id             text primary key,
   development_id text not null references developments(id) on delete cascade,
