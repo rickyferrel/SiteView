@@ -164,6 +164,8 @@ function MapAppearanceSection({
 }) {
   const save = useSaveState();
   const [drag, setDrag] = useState<number | null>(null);
+  const [dragHue, setDragHue] = useState<number | null>(null);
+  const [dragSat, setDragSat] = useState<number | null>(null);
 
   function patch(p: Partial<MapAppearance>) {
     save
@@ -271,6 +273,81 @@ function MapAppearanceSection({
                 <span>3×</span>
               </div>
             </div>
+          )}
+
+          {appearance.basemap === "satellite-streets" && (
+            <>
+              <div className="rule" />
+              <div>
+                <Eyebrow>Satellite tint</Eyebrow>
+                <p className="mt-1 text-[13px] text-graphite">
+                  Color-grade the aerial photo — handy when the imagery was shot in a dead-grass
+                  season and you want it reading greener.
+                </p>
+
+                <div className="mt-4">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-[11px] tracking-[0.04em] text-faint">Hue rotate</span>
+                    <span className="font-mono text-xs text-faint tabular-nums">
+                      {(dragHue ?? appearance.satelliteHueRotate ?? 0).toFixed(0)}°
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={-180}
+                    max={180}
+                    step={1}
+                    value={dragHue ?? appearance.satelliteHueRotate ?? 0}
+                    onChange={(e) => setDragHue(Number(e.target.value))}
+                    onPointerUp={() => {
+                      if (dragHue != null) {
+                        patch({ satelliteHueRotate: dragHue });
+                        setDragHue(null);
+                      }
+                    }}
+                    onKeyUp={() => {
+                      if (dragHue != null) {
+                        patch({ satelliteHueRotate: dragHue });
+                        setDragHue(null);
+                      }
+                    }}
+                    className="instrument mt-3"
+                    aria-label="Satellite hue rotate"
+                  />
+                </div>
+
+                <div className="mt-4">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-[11px] tracking-[0.04em] text-faint">Saturation</span>
+                    <span className="font-mono text-xs text-faint tabular-nums">
+                      {(dragSat ?? appearance.satelliteSaturation ?? 0).toFixed(2)}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={-1}
+                    max={1}
+                    step={0.05}
+                    value={dragSat ?? appearance.satelliteSaturation ?? 0}
+                    onChange={(e) => setDragSat(Number(e.target.value))}
+                    onPointerUp={() => {
+                      if (dragSat != null) {
+                        patch({ satelliteSaturation: dragSat });
+                        setDragSat(null);
+                      }
+                    }}
+                    onKeyUp={() => {
+                      if (dragSat != null) {
+                        patch({ satelliteSaturation: dragSat });
+                        setDragSat(null);
+                      }
+                    }}
+                    className="instrument mt-3"
+                    aria-label="Satellite saturation"
+                  />
+                </div>
+              </div>
+            </>
           )}
         </div>
       )}

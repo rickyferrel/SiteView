@@ -15,12 +15,19 @@ export type MapAppearance = {
   basemap: Basemap;
   terrain: boolean;
   terrainExaggeration: number;
+  // Raster color grading applied to the "satellite-streets" basemap's imagery
+  // layer only (its roads/labels are separate vector layers, untouched) — lets
+  // the operator counteract off-season (e.g. winter/dead-grass) aerial photos.
+  satelliteHueRotate: number; // degrees, -180..180
+  satelliteSaturation: number; // -1..1
 };
 
 export const DEFAULT_APPEARANCE: MapAppearance = {
   basemap: "custom",
   terrain: true,
   terrainExaggeration: 1.5,
+  satelliteHueRotate: 0,
+  satelliteSaturation: 0,
 };
 
 export const BASEMAP_PRESETS: Record<Exclude<Basemap, "custom">, string> = {
@@ -79,6 +86,28 @@ export function hideLegacyLotLayers(map: {
     if (layer.source && legacySources.has(layer.source)) {
       map.setLayoutProperty(layer.id, "visibility", "none");
     }
+  }
+}
+
+// Applies the operator's satellite color grading to every raster layer in the
+// loaded style (i.e. the aerial imagery layer of "satellite-streets" — its
+// road/label overlay is vector, so this can't discolor them). No-op unless a
+// non-zero adjustment is set.
+export function applySatelliteTint(
+  map: {
+    getStyle(): unknown;
+    setPaintProperty(layerId: string, name: string, value: number): void;
+  },
+  appearance: MapAppearance
+) {
+  const hueRotate = appearance.satelliteHueRotate || 0;
+  const saturation = appearance.satelliteSaturation || 0;
+  if (!hueRotate && !saturation) return;
+  const style = map.getStyle() as { layers?: Array<{ id: string; type: string }> } | null;
+  for (const layer of style?.layers ?? []) {
+    if (layer.type !== "raster") continue;
+    map.setPaintProperty(layer.id, "raster-hue-rotate", hueRotate);
+    map.setPaintProperty(layer.id, "raster-saturation", saturation);
   }
 }
 

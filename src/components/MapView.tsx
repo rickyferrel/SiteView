@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import type { MapConfig, Status, Filter, FieldDef, DataState } from "@/lib/types";
-import { resolveMapStyle, hideLegacyLotLayers, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
+import { resolveMapStyle, hideLegacyLotLayers, applySatelliteTint, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
 import { money, acres } from "@/lib/format";
 import { videoEmbed, isHttpUrl, type VideoEmbed } from "@/lib/video";
 import VideoPreview from "@/components/VideoPreview";
@@ -171,6 +171,8 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
             }
           }
         }
+
+        applySatelliteTint(map, appearance);
 
         if (appearance.terrain) {
           if (!map.getSource("mapbox-dem")) {

@@ -22,14 +22,16 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ slug: 
   const next: MapAppearance = {
     basemap: VALID.has(body.basemap as Basemap) ? (body.basemap as Basemap) : dev.map_appearance.basemap,
     terrain: typeof body.terrain === "boolean" ? body.terrain : dev.map_appearance.terrain,
-    terrainExaggeration: clampExaggeration(body.terrainExaggeration, dev.map_appearance.terrainExaggeration),
+    terrainExaggeration: clamp(body.terrainExaggeration, dev.map_appearance.terrainExaggeration ?? 1.5, 0, 3),
+    satelliteHueRotate: clamp(body.satelliteHueRotate, dev.map_appearance.satelliteHueRotate ?? 0, -180, 180),
+    satelliteSaturation: clamp(body.satelliteSaturation, dev.map_appearance.satelliteSaturation ?? 0, -1, 1),
   };
   await updateAppearance(dev.id, next);
   return ok(next);
 }
 
-function clampExaggeration(v: unknown, fallback: number): number {
+function clamp(v: unknown, fallback: number, min: number, max: number): number {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
-  return Math.min(3, Math.max(0, n));
+  return Math.min(max, Math.max(min, n));
 }
