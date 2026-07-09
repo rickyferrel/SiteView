@@ -7,7 +7,13 @@ export const runtime = "nodejs";
 
 // GET /api/dev — every development, for the switcher.
 export async function GET() {
-  return ok(await listDevelopments());
+  try {
+    return ok(await listDevelopments());
+  } catch (e) {
+    // Surface the DB error to the atlas banner — a bare 500 hides whether the
+    // database is unreachable, mis-authed, or mis-selected (see /api/health).
+    return fail((e as Error).message, 500);
+  }
 }
 
 // POST /api/dev — create a development. Returns the new row; 409 on slug clash.
