@@ -11,7 +11,7 @@ import GeoJsonUpload from "@/components/GeoJsonUpload";
 import { Eyebrow, Logomark, PageHeader, cx } from "@/components/ui";
 
 // Where the lot geometry comes from: the county-records picker (ArcGIS LIR
-// API) or an operator-supplied GeoJSON file.
+// API) or an operator-supplied file (GeoJSON or Esri Shapefile).
 type Source = "map" | "file";
 
 export default function AddParcelsPage() {
@@ -34,7 +34,7 @@ export default function AddParcelsPage() {
         description={
           source === "map"
             ? "Search an address to fly there, then click parcels or drag a box to select the lots that belong to this development. Importing pulls clean county geometry in with your default status."
-            : "Upload a GeoJSON file of your lot polygons — from GIS software, a survey, or a converted CAD drawing. Big county-wide files are fine: you'll trim the selection down to your community on a map before importing."
+            : "Upload your lot polygons as GeoJSON or an Esri Shapefile (.zip or .shp + .dbf + .prj) — from GIS software, a survey, or a CAD export. Big county-wide files are fine: you'll trim the selection down to your community on a map before importing."
         }
         actions={
           <div className="flex items-center gap-3">
@@ -43,7 +43,7 @@ export default function AddParcelsPage() {
                 County records
               </SourceTab>
               <SourceTab active={source === "file"} onClick={() => setSource("file")}>
-                Upload GeoJSON
+                Upload file
               </SourceTab>
             </div>
             <Link

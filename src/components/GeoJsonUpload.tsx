@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { devPath } from "@/lib/const";
 import { jsend } from "@/lib/client";
 import { normalizeGeoJSON, roundGeometry, type NormalizedParcel, type NormalizeResult } from "@/lib/geojson";
+import { isShapefileUpload, shapefileToGeoJSON } from "@/lib/shapefile";
 import GeoJsonTrimMap from "@/components/GeoJsonTrimMap";
 import { cx, Eyebrow } from "@/components/ui";
 
@@ -24,11 +25,12 @@ type Stage = "summary" | "trim";
 
 /**
  * The "bring your own geometry" path of the add-parcels step. Drop a GeoJSON
- * export (from GIS/CAD tooling — even a full county): it's parsed in the
- * browser, oversized files route through a map step to trim the selection down
- * to the community, and the confirmed lots (max 2,000) upload in ~3 MB batches
- * with their derived parcel IDs stamped, so the server resolves the same IDs
- * per batch.
+ * export or an Esri Shapefile (zipped, or .shp + .dbf + .prj together — CAD/
+ * county exports in State Plane/UTM reproject via the .prj) — even a full
+ * county: it's parsed in the browser, oversized files route through a map step
+ * to trim the selection down to the community, and the confirmed lots (max
+ * 2,000) upload in ~3 MB batches with their derived parcel IDs stamped, so the
+ * server resolves the same IDs per batch.
  */
 export default function GeoJsonUpload({ slug, token }: { slug: string; token: string }) {
   const router = useRouter();
@@ -40,24 +42,47 @@ export default function GeoJsonUpload({ slug, token }: { slug: string; token: st
   const [reading, setReading] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
-  async function readFile(file: File) {
+  async function readFiles(files: File[]) {
+    if (files.length === 0) return;
     setError(null);
     setParsed(null);
-    if (file.size > MAX_BYTES) {
-      setError(`That file is ${(file.size / 1024 / 1024).toFixed(0)} MB — too large to parse in the browser (limit ${MAX_BYTES / 1024 / 1024} MB). Simplify the geometry or split the file.`);
+    const bytes = files.reduce((n, f) => n + f.size, 0);
+    if (bytes > MAX_BYTES) {
+      setError(`That upload is ${(bytes / 1024 / 1024).toFixed(0)} MB — too large to parse in the browser (limit ${MAX_BYTES / 1024 / 1024} MB). Simplify the geometry or split the file.`);
       return;
     }
     setReading(true);
     try {
       // Yield a frame so the "Reading…" state paints before the parse blocks.
       await new Promise((r) => setTimeout(r, 30));
-      const raw: unknown = JSON.parse(await file.text());
+      let raw: unknown;
+      let fileName: string;
+      let extraWarnings: string[] = [];
+      if (isShapefileUpload(files)) {
+        const sf = await shapefileToGeoJSON(files);
+        raw = sf.geojson;
+        fileName = sf.fileName;
+        extraWarnings = sf.warnings;
+      } else {
+        fileName = files[0].name;
+        try {
+          raw = JSON.parse(await files[0].text());
+        } catch {
+          throw new Error("That file isn't valid JSON.");
+        }
+      }
       const result = normalizeGeoJSON(raw);
-      setParsed({ fileName: file.name, result });
+      result.warnings.unshift(...extraWarnings);
+      setParsed({ fileName, result });
       // Too many lots to be one development → straight to the trim map.
       setStage(result.parcels.length > IMPORT_MAX ? "trim" : "summary");
     } catch (e) {
-      setError(e instanceof SyntaxError ? "That file isn't valid JSON." : String(e instanceof Error ? e.message : e));
+      let msg = String(e instanceof Error ? e.message : e);
+      // A shapefile that trips the WGS84 check is usually just missing its .prj.
+      if (isShapefileUpload(files) && msg.includes("longitude/latitude")) {
+        msg += " If the shapefile came with a .prj file, include it — coordinates convert automatically.";
+      }
+      setError(msg);
     } finally {
       setReading(false);
     }
@@ -152,18 +177,17 @@ export default function GeoJsonUpload({ slug, token }: { slug: string; token: st
       onDrop={(e) => {
         e.preventDefault();
         setDragging(false);
-        const file = e.dataTransfer.files?.[0];
-        if (file) void readFile(file);
+        void readFiles(Array.from(e.dataTransfer.files ?? []));
       }}
     >
       <input
         ref={inputRef}
         type="file"
-        accept=".geojson,.json,application/geo+json,application/json"
+        multiple
+        accept=".geojson,.json,.zip,.shp,.dbf,.prj,.cpg,.shx,application/geo+json,application/json,application/zip"
         className="hidden"
         onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) void readFile(file);
+          void readFiles(Array.from(e.target.files ?? []));
           e.target.value = "";
         }}
       />
@@ -182,14 +206,15 @@ export default function GeoJsonUpload({ slug, token }: { slug: string; token: st
             <path d="M12 16V5m0 0-4 4m4-4 4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
             <path d="M4 16v2.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </svg>
-          <Eyebrow className="!text-white/55">Upload · GeoJSON</Eyebrow>
+          <Eyebrow className="!text-white/55">Upload · GeoJSON or Shapefile</Eyebrow>
           <span className="text-[15px] font-semibold text-white">
-            {reading ? "Reading file…" : "Drop a .geojson file here, or click to browse"}
+            {reading ? "Reading file…" : "Drop a .geojson or shapefile here, or click to browse"}
           </span>
           <span className="max-w-sm text-[12px] leading-relaxed text-white/50">
-            Polygons in longitude/latitude (WGS84). Lot IDs, acreage, and addresses are picked up from feature
-            properties when present. County-wide exports are fine — you&apos;ll trim to your community on a map next.
-            Exporting from CAD? Convert the drawing to georeferenced GeoJSON first.
+            GeoJSON, or an Esri Shapefile as a .zip (or the .shp, .dbf, and .prj selected together). Shapefiles in a
+            projected system (State Plane, UTM) convert automatically when the .prj is included; GeoJSON must already
+            be longitude/latitude (WGS84). Lot IDs, acreage, and addresses are picked up from feature properties.
+            County-wide exports are fine — you&apos;ll trim to your community on a map next.
           </span>
         </button>
       ) : (
