@@ -7,7 +7,7 @@
 // IntersectionObservers).
 
 import Image from "next/image";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const MAP_IMG = "/mpcg/siteview-map.jpg";
 const EMBED_URL = "https://main.d1fccqopge5j62.amplifyapp.com/embed/summit-creek-utah";
@@ -21,17 +21,18 @@ const STATUSES = [
 
 const SERVICES = [
   {
-    num: "01",
+    title: "Economic studies",
+    desc: "We map the market before you break ground — demand, pricing, absorption, and what the competition down the road is really doing.",
+  },
+  {
     title: "Community websites",
     desc: "A digital sales center that never closes — fast, beautiful, and wired to your CRM from day one.",
   },
   {
-    num: "02",
     title: "Marketing that moves lots",
     desc: "Brand, launch strategy, and always-on campaigns that fill your pipeline before the models open.",
   },
   {
-    num: "03",
     title: "SiteView 3D mapping",
     desc: "Your master plan, alive — an interactive 3D map buyers explore parcel by parcel, phase by phase.",
   },
@@ -44,11 +45,28 @@ const SITEVIEW_FEATURES = [
   { title: "Lives on your website", desc: "Embeds anywhere. Works on every device your buyers own." },
 ];
 
-const STEPS = [
-  { num: "01", title: "Immerse", desc: "We learn the land, the buyer, and the numbers before anything gets built." },
-  { num: "02", title: "Build", desc: "Brand, website, and SiteView map — one integrated system, not three vendors." },
-  { num: "03", title: "Launch", desc: "Campaigns go live. Interest lists become appointments at the sales office." },
-  { num: "04", title: "Sell through", desc: "We optimize weekly — pricing, phasing, media — until the last lot closes." },
+const COMMUNITIES = [
+  {
+    index: "01",
+    name: "Summit Creek",
+    location: "Utah",
+    slug: "summit-creek-utah",
+    embed: "https://main.d1fccqopge5j62.amplifyapp.com/embed/summit-creek-utah",
+  },
+  {
+    index: "02",
+    name: "Sand Hollow Resort",
+    location: "Southern Utah",
+    slug: "sand-hollow-resort",
+    embed: "https://main.d1fccqopge5j62.amplifyapp.com/embed/sand-hollow-resort",
+  },
+  {
+    index: "03",
+    name: "Seven Mile Ranch",
+    location: "Bear Lake, Utah",
+    slug: "seven-mile-ranch-bear-lake",
+    embed: "https://main.d1fccqopge5j62.amplifyapp.com/embed/seven-mile-ranch-bear-lake",
+  },
 ];
 
 
@@ -157,6 +175,128 @@ function Legend() {
   );
 }
 
+/* =================== COMMUNITIES =================== */
+
+function Communities() {
+  const [active, setActive] = useState(0);
+  const [mapReady, setMapReady] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const frameRef = useRef<HTMLDivElement>(null);
+
+  // Lazy-mount the WebGL embed only as the frame nears the viewport, so a
+  // Mapbox GL instance never spins up off-screen. Only the active community's
+  // iframe is ever in the DOM (keyed by index) — always exactly one live map.
+  useEffect(() => {
+    const el = frameRef.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setMapReady(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setMapReady(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: "250px" }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  const choose = (i: number) => {
+    if (i === active) return;
+    setActive(i);
+    setLoading(true);
+  };
+
+  const c = COMMUNITIES[active];
+
+  return (
+    <div id="communities" className="nr-cm">
+      <div className="nr-cm-head">
+        <div>
+          <div data-reveal={0} className="nr-kick">Communities</div>
+          <h2 data-reveal={0.1} className="nr-h2">
+            Explore the maps. They&apos;re live.
+          </h2>
+        </div>
+        <p data-reveal={0.2} className="nr-cm-note">
+          Pick a community and explore its live SiteView map — the real thing, not a screenshot.
+        </p>
+      </div>
+
+      <div className="nr-cm-stage">
+        <div data-reveal={0} className="nr-cm-switch">
+          <div className="nr-cm-switch-label">Select a community</div>
+          <div className="nr-cm-entries">
+            {COMMUNITIES.map((item, i) => (
+              <button
+                key={item.slug}
+                type="button"
+                className="nr-cm-entry"
+                data-active={i === active ? "true" : "false"}
+                aria-pressed={i === active}
+                onClick={() => choose(i)}
+              >
+                <div className="nr-cm-entry-row">
+                  <span className="nr-cm-idx">{item.index}</span>
+                  <span className="nr-cm-tick" />
+                </div>
+                <div className="nr-cm-name">{item.name}</div>
+                <div className="nr-cm-loc">{item.location}</div>
+              </button>
+            ))}
+          </div>
+          <div className="nr-cm-hint">
+            <i />
+            <span>Click any lot · drag to explore</span>
+          </div>
+        </div>
+
+        <div className="nr-cm-view">
+          <div ref={frameRef} data-reveal={0.1} className="nr-cm-frame">
+            {mapReady ? (
+              <iframe
+                key={active}
+                className="nr-cm-map"
+                src={c.embed}
+                title={`${c.name} — interactive 3D parcel map, ${c.location}`}
+                allow="geolocation"
+                loading="lazy"
+                onLoad={() => setLoading(false)}
+              />
+            ) : (
+              <div className="nr-cm-idle">
+                <span className="nr-cm-idle-dot mpcg-pulse" />
+                <span className="nr-cm-idle-text">Loading live map…</span>
+              </div>
+            )}
+
+            {mapReady && loading && (
+              <div className="nr-cm-loading">
+                <span className="nr-cm-idle-dot mpcg-pulse" />
+                <span className="nr-cm-idle-text">Loading {c.name}…</span>
+              </div>
+            )}
+          </div>
+
+          <div data-reveal={0.15} className="nr-cm-spec">
+            <span className="nr-cm-spec-live mpcg-pulse" aria-hidden="true" />
+            <span className="nr-cm-spec-name">{c.name}</span>
+            <span className="nr-cm-spec-sep" />
+            <span className="nr-cm-spec-loc">{c.location}</span>
+            <span className="nr-cm-spec-sep" />
+            <span className="nr-cm-spec-desc">Interactive 3D parcel map — live availability</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ===================== NOIR ===================== */
 
 function Noir() {
@@ -168,7 +308,7 @@ function Noir() {
           <div className="nr-links">
             <a href="#services" className="nr-link">Services</a>
             <a href="#siteview" className="nr-link">SiteView</a>
-            <a href="#process" className="nr-link">Process</a>
+            <a href="#communities" className="nr-link">Communities</a>
             <a href="#contact" className="nr-nav-cta">Schedule a consultation</a>
           </div>
         </div>
@@ -199,10 +339,7 @@ function Noir() {
         </div>
       </div>
 
-      <div className="nr-band">
-        <Image data-kb src={MAP_IMG} alt="SiteView 3D community map" fill sizes="100vw" />
-        <div className="nr-band-fade" />
-      </div>
+      <Communities />
 
       <div id="services" className="nr-services">
         <div className="nr-svc-head">
@@ -213,8 +350,7 @@ function Noir() {
           <p data-reveal={0.2} className="nr-svc-note">No handoffs between vendors. One system, built to move lots.</p>
         </div>
         {SERVICES.map((s, i) => (
-          <div key={s.num} data-reveal={i * 0.05} className="nr-svc-row">
-            <div className="nr-svc-num">{s.num}</div>
+          <div key={s.title} data-reveal={i * 0.05} className="nr-svc-row">
             <div className="nr-svc-title">{s.title}</div>
             <div className="nr-svc-desc">{s.desc}</div>
           </div>
@@ -246,20 +382,6 @@ function Noir() {
               </div>
             ))}
           </div>
-        </div>
-      </div>
-
-      <div id="process" className="nr-process">
-        <div data-reveal={0} className="nr-kick">How we work</div>
-        <h2 data-reveal={0.1} className="nr-h2">Four steps to sold out.</h2>
-        <div className="nr-steps">
-          {STEPS.map((s, i) => (
-            <div key={s.num} data-reveal={i * 0.08} className="nr-step">
-              <div className="nr-step-num">{s.num}</div>
-              <div className="nr-step-title">{s.title}</div>
-              <div className="nr-step-desc">{s.desc}</div>
-            </div>
-          ))}
         </div>
       </div>
 
