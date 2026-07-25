@@ -5,6 +5,7 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import type { MapConfig, Status, Filter, FieldDef, DataState } from "@/lib/types";
 import { resolveMapStyle, hideLegacyLotLayers, applySatelliteTint, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
+import { DEM_SOURCE, openingViewFor, applyOpeningView, holdOpeningView, type CameraHold } from "@/lib/camera";
 import { money, acres } from "@/lib/format";
 import { videoEmbed, isHttpUrl, type VideoEmbed } from "@/lib/video";
 import VideoPreview from "@/components/VideoPreview";
@@ -40,43 +41,6 @@ function PanelVideo({ embed, title }: { embed: VideoEmbed; title: string }) {
   );
 }
 
-function eachVertex(f: GeoJSON.Feature, fn: (pt: [number, number]) => void) {
-  const g = f.geometry;
-  if (!g) return;
-  const polys =
-    g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : [];
-  for (const poly of polys) for (const ring of poly) for (const pt of ring) fn(pt as [number, number]);
-}
-
-// Bounds of the main lot cluster, so we frame the development on first open
-// instead of trusting a stored default_view. A few far-flung outlier parcels
-// can otherwise inflate the extent and zoom the camera out to a regional view,
-// so reject parcels far from the cluster center (robust median-distance test).
-function lotClusterBounds(fc: GeoJSON.FeatureCollection): mapboxgl.LngLatBounds | null {
-  const feats: { f: GeoJSON.Feature; c: [number, number] }[] = [];
-  for (const f of fc.features) {
-    let sx = 0, sy = 0, n = 0;
-    eachVertex(f, ([x, y]) => { sx += x; sy += y; n++; });
-    if (n) feats.push({ f, c: [sx / n, sy / n] });
-  }
-  if (!feats.length) return null;
-
-  const med = (arr: number[]) => {
-    const s = [...arr].sort((a, b) => a - b);
-    return s[Math.floor((s.length - 1) / 2)];
-  };
-  const cx = med(feats.map((d) => d.c[0]));
-  const cy = med(feats.map((d) => d.c[1]));
-  const dists = feats.map((d) => Math.hypot(d.c[0] - cx, d.c[1] - cy));
-  const thresh = Math.max(med(dists) * 6, 0.003); // ~>=330m floor for tight clusters
-  const kept = feats.filter((_, i) => dists[i] <= thresh);
-  const use = kept.length ? kept : feats;
-
-  const b = new mapboxgl.LngLatBounds();
-  for (const { f } of use) eachVertex(f, (pt) => b.extend(pt));
-  return b.isEmpty() ? null : b;
-}
-
 export default function MapView({ slug, state, stop, ribbon = true, edit = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
@@ -90,6 +54,8 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
   useEffect(() => {
     let cancelled = false;
     let map: mapboxgl.Map | null = null;
+    let hold: CameraHold | null = null;
+    let resizeObserver: ResizeObserver | null = null;
 
     (async () => {
       const [cRes, pRes] = await Promise.all([
@@ -102,7 +68,8 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
       }
       const cfg = (await cRes.json()) as MapConfig;
       const fc = (await pRes.json()) as GeoJSON.FeatureCollection;
-      if (cancelled || !containerRef.current) return;
+      const container = containerRef.current;
+      if (cancelled || !container) return;
       setConfig(cfg);
       fcRef.current = fc;
 
@@ -110,9 +77,13 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
       const view = cfg.development.stop_views[stop ?? ""] ?? cfg.development.default_view;
       const usingNamedStop = !!(stop && cfg.development.stop_views[stop]);
       const appearance = cfg.development.map_appearance ?? DEFAULT_APPEARANCE;
+      // A named stop, and a default_view the operator hand-framed (view_locked),
+      // are exact cameras. Otherwise auto-fit the actual lots so they're always
+      // in view, keeping the configured tilt out of it.
+      const opening = openingViewFor(view, usingNamedStop || cfg.development.view_locked, fc);
 
       map = new mapboxgl.Map({
-        container: containerRef.current,
+        container,
         style: resolveMapStyle(cfg.development.mapbox_style, appearance.basemap),
         center: view.center,
         zoom: view.zoom,
@@ -124,26 +95,19 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
       });
       mapRef.current = map;
 
-      // On first open (no specific stop), frame the actual lots — keeping the
-      // configured tilt/bearing — so they're always in view. Snap before paint
-      // (duration 0) to avoid a visible jump from the stored default_view.
-      // When the operator has hand-framed the opening view (view_locked), skip
-      // the auto-fit entirely: the constructor already opened at default_view.
-      if (!usingNamedStop && !cfg.development.view_locked) {
-        const b = lotClusterBounds(fc);
-        if (b) {
-          // A clean north-up overview with a gentle tilt. The configured
-          // default_view pitch (often steep/cinematic) would, over the lots'
-          // large span, push the camera back to a regional view.
-          map.fitBounds(b, {
-            padding: 60,
-            pitch: 30,
-            bearing: 0,
-            maxZoom: 16,
-            duration: 0,
-          });
-        }
-      }
+      // Snap to the opening shot before first paint (duration 0), so there's no
+      // visible jump from the camera the constructor opened at — then hold it
+      // there until the terrain has loaded underneath. Without that hold the
+      // camera lands correctly only when the DEM tiles happen to arrive in a
+      // favorable order (see holdOpeningView).
+      applyOpeningView(map, opening);
+      hold = holdOpeningView(map, opening);
+
+      // The embed is iframed, so its box can settle — or be resized by the host
+      // page — after the map is built. (This replaces a fixed 300ms resize,
+      // which raced the container's own layout.)
+      resizeObserver = new ResizeObserver(() => hold?.resize());
+      resizeObserver.observe(container);
 
       map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
       map.addControl(
@@ -175,8 +139,8 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
         applySatelliteTint(map, appearance);
 
         if (appearance.terrain) {
-          if (!map.getSource("mapbox-dem")) {
-            map.addSource("mapbox-dem", {
+          if (!map.getSource(DEM_SOURCE)) {
+            map.addSource(DEM_SOURCE, {
               type: "raster-dem",
               url: "mapbox://mapbox.mapbox-terrain-dem-v1",
               tileSize: 512,
@@ -184,7 +148,10 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
             });
           }
           const exaggeration = appearance.terrainExaggeration ?? cfg.development.terrain_exaggeration;
-          map.setTerrain({ source: "mapbox-dem", exaggeration });
+          map.setTerrain({ source: DEM_SOURCE, exaggeration });
+          // Enabling terrain re-derives the camera from ground elevation, so
+          // re-assert the framing we want before the first terrain frame.
+          hold?.apply();
         } else {
           map.setTerrain(null);
         }
@@ -248,10 +215,10 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
           const pid = props.parcel_id;
           map.setFilter(SEL_FILL, ["==", ["get", "parcel_id"], pid]);
           map.setFilter(SEL_LINE, ["==", ["get", "parcel_id"], pid]);
+          // The visitor is driving now — stop re-asserting the opening camera.
+          hold?.release();
           map.flyTo({ center: e.lngLat, zoom: Math.max(map.getZoom(), 17), pitch: 70, duration: 1200, essential: true });
         });
-
-        setTimeout(() => map?.resize(), 300);
       });
     })().catch((err) => {
       if (!cancelled) setError(String(err));
@@ -259,6 +226,8 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
 
     return () => {
       cancelled = true;
+      resizeObserver?.disconnect();
+      hold?.release();
       map?.remove();
       mapRef.current = null;
     };
