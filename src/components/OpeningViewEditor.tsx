@@ -5,6 +5,15 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import type { MapConfig, Status, ViewState } from "@/lib/types";
 import { resolveMapStyle, hideLegacyLotLayers, applySatelliteTint, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
+import {
+  DEM_SOURCE,
+  CLUSTER_FIT,
+  lotClusterBounds,
+  openingViewFor,
+  applyOpeningView,
+  holdOpeningView,
+  type CameraHold,
+} from "@/lib/camera";
 import { jsend } from "@/lib/client";
 import { cx } from "@/components/ui";
 
@@ -23,39 +32,6 @@ function fillColorExpr(statuses: Status[]) {
   for (const s of statuses) expr.push(s.name, s.color);
   expr.push(def);
   return expr;
-}
-
-function eachVertex(f: GeoJSON.Feature, fn: (pt: [number, number]) => void) {
-  const g = f.geometry;
-  if (!g) return;
-  const polys =
-    g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : [];
-  for (const poly of polys) for (const ring of poly) for (const pt of ring) fn(pt as [number, number]);
-}
-
-// Same robust cluster framing the embed uses when no view is locked, so the
-// "auto-fit" reset previews exactly what the public map will show.
-function lotClusterBounds(fc: GeoJSON.FeatureCollection): mapboxgl.LngLatBounds | null {
-  const feats: { f: GeoJSON.Feature; c: [number, number] }[] = [];
-  for (const f of fc.features) {
-    let sx = 0, sy = 0, n = 0;
-    eachVertex(f, ([x, y]) => { sx += x; sy += y; n++; });
-    if (n) feats.push({ f, c: [sx / n, sy / n] });
-  }
-  if (!feats.length) return null;
-  const med = (arr: number[]) => {
-    const s = [...arr].sort((a, b) => a - b);
-    return s[Math.floor((s.length - 1) / 2)];
-  };
-  const cx = med(feats.map((d) => d.c[0]));
-  const cy = med(feats.map((d) => d.c[1]));
-  const dists = feats.map((d) => Math.hypot(d.c[0] - cx, d.c[1] - cy));
-  const thresh = Math.max(med(dists) * 6, 0.003);
-  const kept = feats.filter((_, i) => dists[i] <= thresh);
-  const use = kept.length ? kept : feats;
-  const b = new mapboxgl.LngLatBounds();
-  for (const { f } of use) eachVertex(f, (pt) => b.extend(pt));
-  return b.isEmpty() ? null : b;
 }
 
 type Props = {
@@ -83,6 +59,8 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
   useEffect(() => {
     let cancelled = false;
     let map: mapboxgl.Map | null = null;
+    let hold: CameraHold | null = null;
+    let resizeObserver: ResizeObserver | null = null;
 
     (async () => {
       const [cRes, pRes] = await Promise.all([
@@ -95,16 +73,20 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
       }
       const cfg = (await cRes.json()) as MapConfig;
       const fc = (await pRes.json()) as GeoJSON.FeatureCollection;
-      if (cancelled || !containerRef.current) return;
+      const container = containerRef.current;
+      if (cancelled || !container) return;
       fcRef.current = fc;
       setLocked(cfg.development.view_locked);
 
       mapboxgl.accessToken = cfg.development.mapbox_token;
       const view = cfg.development.default_view;
       const appearance = cfg.development.map_appearance ?? DEFAULT_APPEARANCE;
+      // If no view is locked yet, open on the same auto-fit the public map uses
+      // today, so the operator adjusts from what visitors currently see.
+      const opening = openingViewFor(view, cfg.development.view_locked, fc);
 
       map = new mapboxgl.Map({
-        container: containerRef.current,
+        container,
         style: resolveMapStyle(cfg.development.mapbox_style, appearance.basemap),
         center: view.center,
         zoom: view.zoom,
@@ -115,6 +97,16 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
         antialias: true,
       });
       mapRef.current = map;
+
+      // Frame the shot before first paint, then hold it while the terrain loads
+      // in — the same camera hold the embed uses, so what the operator frames
+      // here is what visitors get (see holdOpeningView).
+      applyOpeningView(map, opening);
+      hold = holdOpeningView(map, opening);
+
+      resizeObserver = new ResizeObserver(() => hold?.resize());
+      resizeObserver.observe(container);
+
       map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
 
       const syncHud = () => {
@@ -141,8 +133,8 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
         applySatelliteTint(map, appearance);
 
         if (appearance.terrain) {
-          if (!map.getSource("mapbox-dem")) {
-            map.addSource("mapbox-dem", {
+          if (!map.getSource(DEM_SOURCE)) {
+            map.addSource(DEM_SOURCE, {
               type: "raster-dem",
               url: "mapbox://mapbox.mapbox-terrain-dem-v1",
               tileSize: 512,
@@ -150,7 +142,9 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
             });
           }
           const exaggeration = appearance.terrainExaggeration ?? cfg.development.terrain_exaggeration;
-          map.setTerrain({ source: "mapbox-dem", exaggeration });
+          map.setTerrain({ source: DEM_SOURCE, exaggeration });
+          // Enabling terrain re-derives the camera from ground elevation.
+          hold?.apply();
         }
 
         map.addSource("parcels", { type: "geojson", data: fc, promoteId: "parcel_id" });
@@ -179,16 +173,8 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
           paint: { "text-color": "#ffffff", "text-halo-color": "#000000", "text-halo-width": 1, "text-opacity": 0.85 },
         });
 
-        // If no view is locked yet, open on the same auto-fit the public map
-        // currently uses, so the operator adjusts from what visitors see today.
-        if (!cfg.development.view_locked) {
-          const b = lotClusterBounds(fc);
-          if (b) map.fitBounds(b, { padding: 60, pitch: 30, bearing: 0, maxZoom: 16, duration: 0 });
-        }
-
         syncHud();
         setReady(true);
-        setTimeout(() => map?.resize(), 200);
       });
 
       map.on("move", syncHud);
@@ -198,6 +184,8 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
 
     return () => {
       cancelled = true;
+      resizeObserver?.disconnect();
+      hold?.release();
       map?.remove();
       mapRef.current = null;
     };
@@ -243,7 +231,7 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
       const fc = fcRef.current;
       if (map && fc) {
         const b = lotClusterBounds(fc);
-        if (b) map.fitBounds(b, { padding: 60, pitch: 30, bearing: 0, maxZoom: 16, duration: 800 });
+        if (b) map.fitBounds(b, { ...CLUSTER_FIT, duration: 800 });
       }
       onReset?.();
     } catch (e) {

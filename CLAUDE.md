@@ -28,8 +28,19 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   the latest **published** snapshot. Publish = snapshot draft → `publications`.
 - **Opening view:** the embed opens at the development's `default_view` (center/zoom/pitch/
   bearing). When `view_locked` is true (operator hand-framed it) the embed uses that view
-  exactly; otherwise it auto-fits the lot cluster (`lotClusterBounds` in `MapView.tsx`).
-  Import auto-frames `default_view` only while unlocked, so a saved view is never clobbered.
+  exactly; otherwise it auto-fits the lot cluster (`lotClusterBounds`). All of that lives in
+  `src/lib/camera.ts`, shared by the embed and the Opening View editor so both frame a
+  development identically. Import auto-frames `default_view` only while unlocked, so a saved
+  view is never clobbered.
+- **Terrain fights the opening camera** (`holdOpeningView` in `camera.ts`): with terrain on,
+  mapbox-gl re-derives the camera from DEM elevation every frame, and until the DEM tile under
+  the *center* loads that ground reads as sea level — so a tilted opening view sits below the
+  already-loaded terrain around it and mapbox shoves the camera up, rewriting center/zoom.
+  Tile arrival order is a network race, which is why the opening view used to land correctly
+  only sometimes on the very same map. So the camera is **re-asserted** as DEM tiles stream in
+  and once at idle, then released — and released immediately on any real user input. Camera
+  moves we make ourselves are tagged (`cameraHold` eventData) so they don't look like the
+  visitor grabbing the map. Anything that sets the opening camera must go through this.
 
 ## Running / dev gotchas (important)
 
@@ -82,8 +93,8 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
 | Parcel picker | `src/components/ParcelPicker.tsx` (add-a-development flow: pick parcels off satellite, hover card shows acres/value from LIR → `POST .../import`) |
 | GeoJSON upload | `src/components/GeoJsonUpload.tsx` + `src/lib/geojson.ts` (`normalizeGeoJSON()`: polygons only, WGS84 enforced — projected/CAD coordinates rejected with a re-export hint; parcel IDs + lot fields derived from feature properties, `LOT-00n` generated when absent). Second tab on `d/[slug]/parcels`; `POST .../import { mode: "geojson" }` → `importGeoJSON()` in repo.ts. Client and server run the **same normalizer**, so the pre-import summary matches what imports. Files parse fully in the browser (≤250 MB — county-wide exports OK); >2,000 lots routes through `GeoJsonTrimMap.tsx` (picker-style click/box selection over the file's own polygons, palette kept in sync with `ParcelPicker.tsx`) and imports are capped at 2,000 lots, uploaded as ~3 MB batches (prod Lambda body limit ~6 MB) with derived `parcel_id` stamped so batches resolve stable IDs |
 | CSV lot import | `src/components/CsvImport.tsx` (wizard modal on the Lots page: Upload → Match rows → Map columns → Review) + `src/lib/csv.ts` (parser, lot matching, header/type guessing — pure, so the review preview equals what applies). Enriches **existing** lots only (a CSV has no geometry): rows match on lot #/parcel ID/address (exact → loose → bare-number tiers, with per-row manual fix-ups); columns map to core fields, status, existing custom fields, or new fields (type auto-detected); unknown status values can create statuses from the review step. Blank cells never write or erase; "overwrite vs fill blanks" toggle. Applies via `POST .../import { mode: "csv" }` → `applyCsvImport()` in repo.ts (creates fields/statuses idempotently, whitelisted core-column updates, `properties \|\| jsonb` merge so unmapped keys survive) |
-| Opening view | `src/components/OpeningViewEditor.tsx` (hand-frame the embed's opening camera → `PATCH/DELETE .../view`); a step in the add-flow (`d/[slug]/opening-view`) and a section in Map Design |
-| Types / shared | `src/lib/types.ts`, `src/lib/const.ts` (DEV_SLUG), `src/lib/client.ts`, `src/lib/http.ts` |
+| Opening view | `src/lib/camera.ts` (cluster framing + the terrain camera hold, shared by embed and editor) and `src/components/OpeningViewEditor.tsx` (hand-frame the embed's opening camera → `PATCH/DELETE .../view`); a step in the add-flow (`d/[slug]/opening-view`) and a section in Map Design |
+| Types / shared | `src/lib/types.ts`, `src/lib/const.ts` (DEV_SLUG), `src/lib/client.ts`, `src/lib/http.ts`. `types.ts` is imported by server code, so map helpers there stay structurally typed — anything importing `mapbox-gl` belongs in `camera.ts` |
 | Deploy / infra | `amplify.yml` (build; runs `scripts/write-env.mjs`), `migrate.sql` + `scripts/migrate.mjs` (RDS schema), `HANDOFF.md` (live deploy status), `AWS_SETUP_RUNBOOK.md` |
 
 ## Conventions
