@@ -875,17 +875,47 @@ function toLayer(r: LayerRow): Layer {
 const LAYER_COLS =
   "id, development_id, kind, name, sort_order, visible, opacity, above_lots, visitor_toggle, asset_id, corners, geometry, style";
 
+/**
+ * True when a query failed only because its table isn't there yet.
+ *
+ * Code always reaches production *before* `npm run migrate` runs against RDS,
+ * so every new table has a window where the app is live and the relation is
+ * missing. Reads that ride shared paths must survive that window: `getLayers`
+ * is called by `getDraftConfig`, so an unguarded throw here 500s **every portal
+ * page for every development** until someone runs the migration. Degrading to
+ * "no layers" is a strictly better failure than taking the portal down.
+ *
+ * Writes are deliberately NOT guarded — silently accepting an upload that was
+ * never stored would be far worse than a loud error.
+ */
+function isMissingTable(e: unknown): boolean {
+  const err = e as { code?: string; message?: string };
+  // node-postgres surfaces SQLSTATE 42P01; PGlite only gives us the message.
+  return err?.code === "42P01" || /relation .* does not exist/i.test(err?.message ?? "");
+}
+
 export async function getLayers(devId: string): Promise<Layer[]> {
-  const rows = await query<LayerRow>(
-    `select ${LAYER_COLS} from layers where development_id = $1 order by sort_order, created_at`,
-    [devId]
-  );
-  return rows.map(toLayer);
+  try {
+    const rows = await query<LayerRow>(
+      `select ${LAYER_COLS} from layers where development_id = $1 order by sort_order, created_at`,
+      [devId]
+    );
+    return rows.map(toLayer);
+  } catch (e) {
+    if (!isMissingTable(e)) throw e;
+    console.warn("[layers] table missing — run `npm run migrate`. Serving no layers meanwhile.");
+    return [];
+  }
 }
 
 export async function getLayer(id: string): Promise<Layer | null> {
-  const row = await queryOne<LayerRow>(`select ${LAYER_COLS} from layers where id = $1`, [id]);
-  return row ? toLayer(row) : null;
+  try {
+    const row = await queryOne<LayerRow>(`select ${LAYER_COLS} from layers where id = $1`, [id]);
+    return row ? toLayer(row) : null;
+  } catch (e) {
+    if (!isMissingTable(e)) throw e;
+    return null;
+  }
 }
 
 export type LayerInput = {
@@ -999,10 +1029,18 @@ export async function putAsset(a: AssetInput): Promise<{ id: string; byte_size: 
 }
 
 export async function getAsset(id: string): Promise<Asset | null> {
-  const row = await queryOne<{ id: string; mime: string; hex: string; byte_size: unknown }>(
-    "select id, mime, encode(bytes,'hex') as hex, byte_size from layer_assets where id = $1",
-    [id]
-  );
+  let row: { id: string; mime: string; hex: string; byte_size: unknown } | null;
+  try {
+    row = await queryOne(
+      "select id, mime, encode(bytes,'hex') as hex, byte_size from layer_assets where id = $1",
+      [id]
+    );
+  } catch (e) {
+    // Pre-migration window (see isMissingTable): a 404 is honest here — there
+    // genuinely is no such asset yet — and far better than a bare 500.
+    if (!isMissingTable(e)) throw e;
+    return null;
+  }
   if (!row) return null;
   return {
     id: row.id,
