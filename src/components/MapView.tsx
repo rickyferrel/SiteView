@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
-import type { MapConfig, Status, Filter, FieldDef, DataState } from "@/lib/types";
+import type { MapConfig, Status, Filter, FieldDef, DataState, Layer } from "@/lib/types";
 import { resolveMapStyle, hideLegacyLotLayers, applySatelliteTint, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
+import { syncLayers, setLayerVisible } from "@/lib/mapLayers";
 import { cameraFor, holdCamera, readCamera, type Camera } from "@/lib/camera";
 import { money, acres } from "@/lib/format";
 import { videoEmbed, isHttpUrl, type VideoEmbed } from "@/lib/video";
@@ -86,6 +87,10 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Props_ | null>(null);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
+  const [layersOpen, setLayersOpen] = useState(false);
+  // Layers the visitor has switched off. Purely client-side — a visitor's view
+  // preference is never written back to the operator's configuration.
+  const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(() => new Set());
 
   // Fetch config + parcels and initialize the map once.
   useEffect(() => {
@@ -255,6 +260,11 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
           filter: ["==", ["get", "parcel_id"], "___none___"],
         });
 
+        // Overlays go on after the parcel layers exist, so both stacking anchors
+        // (FILL below, LABEL above) are resolvable. They bind no handlers, so
+        // the lot click/hover handlers below still receive clicks through them.
+        syncLayers(map, cfg.layers ?? [], { fill: FILL, label: LABEL });
+
         map.on("mouseenter", FILL, () => {
           if (map) map.getCanvas().style.cursor = "pointer";
         });
@@ -296,6 +306,24 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
       : null;
     for (const id of [FILL, LINE, LABEL]) map.setFilter(id, expr);
   }, [activeFilter, config]);
+
+  // Layers the operator chose to expose to visitors. A layer hidden in the
+  // portal isn't offered here — hiding it is the operator's decision, not a
+  // default the visitor gets to undo.
+  const toggleableLayers: Layer[] = (config?.layers ?? []).filter(
+    (l) => l.visitor_toggle && l.visible
+  );
+
+  function toggleLayer(id: string, on: boolean) {
+    const map = mapRef.current;
+    if (map) setLayerVisible(map, id, on);
+    setHiddenLayers((prev) => {
+      const next = new Set(prev);
+      if (on) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   function closePanel() {
     setSelected(null);
@@ -363,7 +391,7 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
     <div className="sc-map-wrap">
       <div ref={containerRef} className="sc-map" />
 
-      {config && config.filters.length > 0 && (
+      {config && (config.filters.length > 0 || toggleableLayers.length > 0) && (
         <div className="sc-filters">
           {config.filters.map((f: Filter) => (
             <button
@@ -374,6 +402,33 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
               {activeFilter === f.id ? "View All" : f.label}
             </button>
           ))}
+
+          {/* Collapsed by default — overlays are scenery, not the main control. */}
+          {toggleableLayers.length > 0 && (
+            <div className="sc-layers">
+              <button
+                className={`sc-filter-btn ${layersOpen ? "active" : ""}`}
+                onClick={() => setLayersOpen((o) => !o)}
+                aria-expanded={layersOpen}
+              >
+                Layers
+              </button>
+              {layersOpen && (
+                <div className="sc-layers-menu" role="group" aria-label="Map layers">
+                  {toggleableLayers.map((l) => (
+                    <label key={l.id} className="sc-layers-item">
+                      <input
+                        type="checkbox"
+                        checked={!hiddenLayers.has(l.id)}
+                        onChange={(e) => toggleLayer(l.id, e.target.checked)}
+                      />
+                      <span>{l.name}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

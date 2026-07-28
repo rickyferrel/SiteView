@@ -99,4 +99,42 @@ create table if not exists publications (
   published_at   timestamptz not null default now()
 );
 create index if not exists publications_dev on publications(development_id, published_at desc);
+
+-- Overlay image bytes, deliberately in their own table and NOT on the layer row.
+-- publish() snapshots the whole draft config into publications.snapshot, so bytes
+-- riding on a layer would be duplicated into every publication. Layers carry an
+-- opaque asset_id instead; bytes are served from /api/asset/{id} and cached hard
+-- (immutable — a re-upload mints a new id). Assets are referenced by past
+-- publications, so deleting a layer must never delete its asset: orphans are
+-- left in place on purpose. Moving to S3 later touches this table and that route
+-- only — everything upstream sees an opaque id.
+create table if not exists layer_assets (
+  id         text primary key,
+  mime       text not null,
+  bytes      bytea not null,
+  width      int not null,
+  height     int not null,
+  byte_size  int not null,
+  created_at timestamptz not null default now()
+);
+
+-- Non-parcel map features: a pinned site-plan render ('image') or a drawn
+-- polygon/line ('shape'). Rides the draft/published machinery via MapConfig.
+create table if not exists layers (
+  id             text primary key,
+  development_id text not null references developments(id) on delete cascade,
+  kind           text not null,
+  name           text not null,
+  sort_order     int not null default 0,
+  visible        boolean not null default true,
+  opacity        real not null default 1.0,
+  above_lots     boolean not null default false,
+  visitor_toggle boolean not null default false,
+  asset_id       text references layer_assets(id) on delete set null,
+  corners        jsonb,
+  geometry       jsonb,
+  style          jsonb not null default '{}'::jsonb,
+  created_at     timestamptz not null default now()
+);
+create index if not exists layers_dev on layers(development_id, sort_order);
 `;

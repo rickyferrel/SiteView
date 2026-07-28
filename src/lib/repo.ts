@@ -18,12 +18,15 @@ import type {
   Status,
   FieldDef,
   Filter,
+  Layer,
+  Corners,
+  ShapeStyle,
   MapConfig,
   MapAppearance,
   DataState,
   ViewState,
 } from "./types";
-import { DEFAULT_APPEARANCE } from "./types";
+import { DEFAULT_APPEARANCE, DEFAULT_SHAPE_STYLE } from "./types";
 
 // PGlite returns jsonb as parsed objects, but guard for both shapes.
 function asObj<T>(v: unknown, fallback: T): T {
@@ -269,13 +272,21 @@ async function latestPublication(devId: string) {
 }
 
 export async function getDraftConfig(dev: Development): Promise<MapConfig> {
-  const [statuses, fields, filters, pub] = await Promise.all([
+  const [statuses, fields, filters, layers, pub] = await Promise.all([
     getStatuses(dev.id),
     getFields(dev.id),
     getFilters(dev.id),
+    getLayers(dev.id),
     latestPublication(dev.id),
   ]);
-  return { development: dev, statuses, fields, filters, published_at: pub?.published_at ?? null };
+  return {
+    development: dev,
+    statuses,
+    fields,
+    filters,
+    layers,
+    published_at: pub?.published_at ?? null,
+  };
 }
 
 type ParcelJoin = Record<string, unknown> & {
@@ -327,7 +338,9 @@ export async function getConfig(slug: string, state: DataState): Promise<MapConf
     const pub = await latestPublication(dev.id);
     if (!pub) return null;
     const snap = asObj<{ config: MapConfig }>(pub.snapshot, { config: null as never });
-    return snap.config ?? null;
+    if (!snap.config) return null;
+    // Snapshots taken before layers existed have no `layers` key.
+    return { ...snap.config, layers: snap.config.layers ?? [] };
   }
   return getDraftConfig(dev);
 }
@@ -827,6 +840,176 @@ export async function createFilter(devId: string, f: Partial<Filter>) {
 
 export async function deleteFilter(id: string) {
   await query("delete from filters where id = $1", [id]);
+}
+
+// ---- Map layers ---------------------------------------------------------------
+// Image overlays (a pinned site-plan render) and drawn shapes. Layers ride the
+// existing draft/published machinery — getDraftConfig picks them up, so publish()
+// snapshots them and getConfig("published") reads them back — with one twist:
+// the image *bytes* live in `layer_assets` and never enter a snapshot. Layers
+// carry an opaque `asset_id`; bytes come from /api/asset/{id}. See schema.ts.
+
+type LayerRow = Record<string, unknown>;
+
+function toLayer(r: LayerRow): Layer {
+  return {
+    id: r.id as string,
+    development_id: r.development_id as string,
+    kind: (r.kind as Layer["kind"]) ?? "image",
+    name: (r.name as string) ?? "Layer",
+    sort_order: Number(r.sort_order ?? 0),
+    visible: Boolean(r.visible),
+    opacity: Number(r.opacity ?? 1),
+    above_lots: Boolean(r.above_lots),
+    visitor_toggle: Boolean(r.visitor_toggle),
+    asset_id: (r.asset_id as string | null) ?? null,
+    corners: asObj<Corners | null>(r.corners, null),
+    geometry: asObj<GeoJSON.Geometry | null>(r.geometry, null),
+    style: { ...DEFAULT_SHAPE_STYLE, ...asObj<Partial<ShapeStyle>>(r.style, {}) },
+  };
+}
+
+// Note the explicit column list: `bytes` must never be selected here. A layer
+// list is fetched on every config read, and pulling megabytes of image per row
+// would defeat the whole point of the separate asset table.
+const LAYER_COLS =
+  "id, development_id, kind, name, sort_order, visible, opacity, above_lots, visitor_toggle, asset_id, corners, geometry, style";
+
+export async function getLayers(devId: string): Promise<Layer[]> {
+  const rows = await query<LayerRow>(
+    `select ${LAYER_COLS} from layers where development_id = $1 order by sort_order, created_at`,
+    [devId]
+  );
+  return rows.map(toLayer);
+}
+
+export async function getLayer(id: string): Promise<Layer | null> {
+  const row = await queryOne<LayerRow>(`select ${LAYER_COLS} from layers where id = $1`, [id]);
+  return row ? toLayer(row) : null;
+}
+
+export type LayerInput = {
+  kind: Layer["kind"];
+  name: string;
+  asset_id?: string | null;
+  corners?: Corners | null;
+  geometry?: GeoJSON.Geometry | null;
+  style?: Partial<ShapeStyle>;
+  above_lots?: boolean;
+  visitor_toggle?: boolean;
+  opacity?: number;
+};
+
+export async function createLayer(devId: string, input: LayerInput): Promise<Layer> {
+  const id = randomUUID();
+  // New layers land on top of the existing stack.
+  const top = await queryOne<{ max: number | null }>(
+    "select max(sort_order) as max from layers where development_id = $1",
+    [devId]
+  );
+  const sort = Number(top?.max ?? 0) + 1;
+  await query(
+    `insert into layers
+       (id, development_id, kind, name, sort_order, visible, opacity, above_lots,
+        visitor_toggle, asset_id, corners, geometry, style)
+     values ($1,$2,$3,$4,$5,true,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb)`,
+    [
+      id,
+      devId,
+      input.kind,
+      input.name,
+      sort,
+      input.opacity ?? 1,
+      input.above_lots ?? false,
+      input.visitor_toggle ?? false,
+      input.asset_id ?? null,
+      JSON.stringify(input.corners ?? null),
+      JSON.stringify(input.geometry ?? null),
+      JSON.stringify({ ...DEFAULT_SHAPE_STYLE, ...(input.style ?? {}) }),
+    ]
+  );
+  const layer = await getLayer(id);
+  if (!layer) throw new Error("layer insert failed");
+  return layer;
+}
+
+const LAYER_SCALARS = ["name", "visible", "opacity", "above_lots", "visitor_toggle", "sort_order"] as const;
+const LAYER_JSONB = ["corners", "geometry", "style"] as const;
+
+export async function updateLayer(id: string, patch: Record<string, unknown>): Promise<Layer | null> {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  let i = 1;
+  for (const c of LAYER_SCALARS) {
+    if (patch[c] !== undefined) {
+      sets.push(`${c} = $${i++}`);
+      vals.push(patch[c]);
+    }
+  }
+  for (const c of LAYER_JSONB) {
+    if (patch[c] !== undefined) {
+      sets.push(`${c} = $${i++}::jsonb`);
+      vals.push(JSON.stringify(patch[c]));
+    }
+  }
+  if (!sets.length) return getLayer(id);
+  vals.push(id);
+  await query(`update layers set ${sets.join(", ")} where id = $${i}`, vals);
+  return getLayer(id);
+}
+
+/**
+ * Drop a layer. Deliberately does NOT touch its asset row: past publications
+ * still reference that asset_id, and deleting the bytes would blank the overlay
+ * on the live map. Orphaned assets are small and rare — left in place on purpose.
+ */
+export async function deleteLayer(id: string) {
+  await query("delete from layers where id = $1", [id]);
+}
+
+/** Bulk sort_order write after a drag-reorder. Order of `ids` is the new order. */
+export async function reorderLayers(devId: string, ids: string[]) {
+  for (let i = 0; i < ids.length; i++) {
+    await query("update layers set sort_order = $1 where id = $2 and development_id = $3", [
+      i + 1,
+      ids[i],
+      devId,
+    ]);
+  }
+}
+
+// ---- Layer assets (image bytes) ----------------------------------------------
+// Bytes cross the driver boundary as **hex text** (`decode`/`encode`), never as
+// a binary param. PGlite and node-postgres disagree about binary round-tripping
+// — PGlite hands back a Uint8Array, pg a Buffer, and each infers a param's type
+// its own way — but both move text identically, so this is one code path that
+// behaves the same in dev and on RDS.
+
+export type AssetInput = { mime: string; bytes: Buffer; width: number; height: number };
+export type Asset = { id: string; mime: string; bytes: Buffer; byte_size: number };
+
+export async function putAsset(a: AssetInput): Promise<{ id: string; byte_size: number }> {
+  const id = randomUUID();
+  await query(
+    `insert into layer_assets (id, mime, bytes, width, height, byte_size)
+     values ($1,$2,decode($3,'hex'),$4,$5,$6)`,
+    [id, a.mime, a.bytes.toString("hex"), a.width, a.height, a.bytes.byteLength]
+  );
+  return { id, byte_size: a.bytes.byteLength };
+}
+
+export async function getAsset(id: string): Promise<Asset | null> {
+  const row = await queryOne<{ id: string; mime: string; hex: string; byte_size: unknown }>(
+    "select id, mime, encode(bytes,'hex') as hex, byte_size from layer_assets where id = $1",
+    [id]
+  );
+  if (!row) return null;
+  return {
+    id: row.id,
+    mime: row.mime,
+    bytes: Buffer.from(row.hex ?? "", "hex"),
+    byte_size: Number(row.byte_size ?? 0),
+  };
 }
 
 // ---- Publish ----------------------------------------------------------------

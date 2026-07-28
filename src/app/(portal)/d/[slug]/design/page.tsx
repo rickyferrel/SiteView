@@ -6,6 +6,7 @@ import { jget, jsend } from "@/lib/client";
 import type { Status, FieldDef, Filter, FieldType, MapAppearance } from "@/lib/types";
 import { BASEMAP_OPTIONS } from "@/lib/types";
 import OpeningViewEditor from "@/components/OpeningViewEditor";
+import LayersPanel from "@/components/LayersPanel";
 import {
   PageHeader,
   Section,
@@ -108,6 +109,11 @@ export default function DesignPage() {
         >
           <OpeningViewEditor slug={slug} className="h-[440px] w-full" />
         </Section>
+      </SubSection>
+
+      {/* ── WHAT ELSE IS ON IT ── non-parcel features: a pinned site-plan render */}
+      <SubSection eyebrow="What else is on it" caption="Layers">
+        <LayersPanel slug={slug} />
       </SubSection>
 
       {/* ── WHAT THE DATA MEANS ── statuses lead (they paint the fill), then the field/filter pair */}

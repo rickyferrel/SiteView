@@ -201,12 +201,62 @@ export type Parcel = {
   updated_at: string;
 };
 
+// ---- Map layers -------------------------------------------------------------
+// Non-parcel features on the map: a pinned site-plan render, or a drawn shape
+// standing in for a river / pond / green when there's no render to pin.
+
+export type LayerKind = "image" | "shape";
+
+// The four ground corners an image overlay is pinned to, in Mapbox's required
+// TL, TR, BR, BL order. Out-of-order corners bowtie-warp the texture silently
+// rather than erroring, so always build these through `cornersFromRect()`.
+export type Corners = [
+  [number, number],
+  [number, number],
+  [number, number],
+  [number, number],
+];
+
+export type ShapeStyle = {
+  color: string;
+  width: number; // line width in px (LineString only)
+  fillOpacity: number; // 0..1 (Polygon only)
+};
+
+export const DEFAULT_SHAPE_STYLE: ShapeStyle = {
+  color: "#4a7fb5",
+  width: 6,
+  fillOpacity: 0.55,
+};
+
+export type Layer = {
+  id: string;
+  development_id: string;
+  kind: LayerKind;
+  name: string;
+  sort_order: number;
+  visible: boolean;
+  opacity: number;
+  // false → drawn beneath every parcel layer; true → above the parcel fill but
+  // still below the lot-number labels, so numbers stay legible over a render.
+  above_lots: boolean;
+  // Surfaces this layer in the embed's collapsed "Layers" checklist.
+  visitor_toggle: boolean;
+  // kind="image": the opaque id bytes are fetched from /api/asset/{id} under.
+  asset_id: string | null;
+  corners: Corners | null;
+  // kind="shape": a GeoJSON LineString or Polygon.
+  geometry: GeoJSON.Geometry | null;
+  style: ShapeStyle;
+};
+
 // What the embed map consumes for a development.
 export type MapConfig = {
   development: Development;
   statuses: Status[];
   fields: FieldDef[];
   filters: Filter[];
+  layers: Layer[];
   published_at: string | null;
 };
 

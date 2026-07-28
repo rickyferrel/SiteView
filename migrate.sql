@@ -92,3 +92,33 @@ create table if not exists publications (
   published_at   timestamptz not null default now()
 );
 create index if not exists publications_dev on publications(development_id, published_at desc);
+
+-- Overlay image bytes live apart from the layer row so publish() (which
+-- snapshots the whole config) never duplicates them. See src/lib/schema.ts.
+create table if not exists layer_assets (
+  id         text primary key,
+  mime       text not null,
+  bytes      bytea not null,
+  width      int not null,
+  height     int not null,
+  byte_size  int not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists layers (
+  id             text primary key,
+  development_id text not null references developments(id) on delete cascade,
+  kind           text not null,
+  name           text not null,
+  sort_order     int not null default 0,
+  visible        boolean not null default true,
+  opacity        real not null default 1.0,
+  above_lots     boolean not null default false,
+  visitor_toggle boolean not null default false,
+  asset_id       text references layer_assets(id) on delete set null,
+  corners        jsonb,
+  geometry       jsonb,
+  style          jsonb not null default '{}'::jsonb,
+  created_at     timestamptz not null default now()
+);
+create index if not exists layers_dev on layers(development_id, sort_order);

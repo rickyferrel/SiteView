@@ -26,6 +26,15 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   ArcGIS's job).
 - **Draft vs published:** edits are draft; the in-portal preview reads draft; WordPress reads
   the latest **published** snapshot. Publish = snapshot draft → `publications`.
+- **Map layers** put non-parcel features (a golf course, river, ponds) on the map without
+  building them as lot geometry: an operator pins the developer's **site-plan render** to four
+  ground corners. Layers ride `MapConfig`, so they snapshot and publish for free — but the image
+  **bytes live in their own `layer_assets` table**, never on the layer row, because `publish()`
+  serializes the whole config into one jsonb blob and would otherwise duplicate every render into
+  every publication. Layers carry an opaque `asset_id`; bytes come from `/api/asset/{id}`, cached
+  immutably. Deleting a layer therefore must **not** delete its asset — past publications still
+  reference it, and orphans are left on purpose. Swapping to S3 later touches only that table and
+  that route.
 - **Opening view:** the embed opens at the development's `default_view` (center/zoom/pitch/
   bearing). When `view_locked` is true (operator hand-framed it) the embed uses that view
   exactly; otherwise it auto-fits the lot cluster (`lotClusterBounds` in `MapView.tsx`).
@@ -89,6 +98,7 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
 | Parcel picker | `src/components/ParcelPicker.tsx` (add-a-development flow: pick parcels off satellite, hover card shows acres/value from LIR → `POST .../import`) |
 | GeoJSON upload | `src/components/GeoJsonUpload.tsx` + `src/lib/geojson.ts` (`normalizeGeoJSON()`: polygons only, WGS84 enforced — projected/CAD coordinates rejected with a re-export hint; parcel IDs + lot fields derived from feature properties, `LOT-00n` generated when absent). Second tab on `d/[slug]/parcels`; `POST .../import { mode: "geojson" }` → `importGeoJSON()` in repo.ts. Client and server run the **same normalizer**, so the pre-import summary matches what imports. Files parse fully in the browser (≤250 MB — county-wide exports OK); >2,000 lots routes through `GeoJsonTrimMap.tsx` (picker-style click/box selection over the file's own polygons, palette kept in sync with `ParcelPicker.tsx`) and imports are capped at 2,000 lots, uploaded as ~3 MB batches (prod Lambda body limit ~6 MB) with derived `parcel_id` stamped so batches resolve stable IDs |
 | CSV lot import | `src/components/CsvImport.tsx` (wizard modal on the Lots page: Upload → Match rows → Map columns → Review) + `src/lib/csv.ts` (parser, lot matching, header/type guessing — pure, so the review preview equals what applies). Enriches **existing** lots only (a CSV has no geometry): rows match on lot #/parcel ID/address (exact → loose → bare-number tiers, with per-row manual fix-ups); columns map to core fields, status, existing custom fields, or new fields (type auto-detected); unknown status values can create statuses from the review step. Blank cells never write or erase; "overwrite vs fill blanks" toggle. Applies via `POST .../import { mode: "csv" }` → `applyCsvImport()` in repo.ts (creates fields/statuses idempotently, whitelisted core-column updates, `properties \|\| jsonb` merge so unmapped keys survive) |
+| Map layers | `src/lib/layers.ts` (pure corner/rect math in **Web Mercator** — conformal, so a rect stays a rect and image aspect maps straight onto it), `src/lib/mapLayers.ts` (adds overlays to any map: `above_lots:false` → `beforeId=FILL`, `true` → `beforeId=LABEL` so lot numbers stay legible; overlays bind no handlers, so lot clicks pass through), `src/lib/image.ts` (browser downscale; JPEG when opaque, **WebP when the image has alpha** — a cut-out river must not flatten onto white), `src/components/LayersPanel.tsx` + `src/components/LayerEditor.tsx`, routes `src/app/api/dev/[slug]/layers`, `src/app/api/layer/{[id],reorder}`, `src/app/api/asset/[id]` |
 | Opening view | `src/components/OpeningViewEditor.tsx` (hand-frame the embed's opening camera → `PATCH/DELETE .../view`); a step in the add-flow (`d/[slug]/opening-view`) and a section in Map Design. `src/lib/camera.ts` (`holdCamera`/`cameraFor`) makes that view survive terrain and any iframe size — shared by the editor and the embed so both resolve it identically |
 | Types / shared | `src/lib/types.ts`, `src/lib/const.ts` (DEV_SLUG), `src/lib/client.ts`, `src/lib/http.ts` |
 | Deploy / infra | `amplify.yml` (build; runs `scripts/write-env.mjs`), `migrate.sql` + `scripts/migrate.mjs` (RDS schema), `HANDOFF.md` (live deploy status), `AWS_SETUP_RUNBOOK.md` |
@@ -104,6 +114,15 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   is only the seeded default (`summit-creek`), not a hard pin. Changing a dev's slug moves its public
   `/embed/{slug}` URL — the edit modal gates slug edits behind a warning; delete cascades all child rows.
 - `@types/geojson` is referenced via `src/geojson.d.ts` so the global `GeoJSON.*` namespace resolves.
+- **Binary columns cross the driver boundary as hex text** (`decode($n,'hex')` in, `encode(bytes,'hex')`
+  out) — PGlite returns `Uint8Array` and node-postgres returns `Buffer`, and they infer binary
+  param types differently, so hex is the one path that behaves the same in dev and on RDS.
+- The layer editor runs the map **flat** — pitch 0, terrain off, rotation locked. Under pitch or
+  terrain, GL JS resolves screen→ground against the streaming DEM, so a dragged corner lands
+  somewhere other than where it was dropped. Handle drags also listen on `window`, not on the grip
+  or via pointer capture: a grip is 14px, so the pointer leaves it immediately and any
+  handle-scoped listener stops receiving moves. Grips render *above* the floating chrome (z-40)
+  so a corner sitting behind the command bar is still grabbable.
 
 ## Verifying changes
 
@@ -111,6 +130,9 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   migrates real data (hits network), `POST .../publish` snapshots.
 - Visual: Playwright (installed) can screenshot `/embed/summit-creek` — launch chromium with
   `--use-angle=swiftshader` for WebGL, wait for `.mapboxgl-canvas` + ~9s for tiles/terrain.
+- Layers: `POST /api/dev/{slug}/layers` with `{kind:"image", corners, image:{data:<base64>,mime,width,height}}`,
+  then `GET /api/asset/{id}` must return byte-identical bytes; after `publish`, the published
+  config must carry the layer's `asset_id` and **no** base64.
 - Prod smoke check: `curl https://main.d1fccqopge5j62.amplifyapp.com/api/dev` → fast `200`
   JSON array. A slow (~8s) empty-body 500 means the Lambda OOMed loading PGlite — i.e. the
   runtime didn't get the `PG*` env vars (see Production section).

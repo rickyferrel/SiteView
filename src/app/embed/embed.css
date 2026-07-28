@@ -75,6 +75,50 @@
   outline-offset: 2px;
 }
 
+/* LAYERS — collapsed toggle for operator-exposed overlays (site plan, river…).
+   Rides in the same top-left cluster as the filter chips and borrows their
+   button treatment, so it reads as one control bar rather than a second one. */
+.sc-layers {
+  position: relative;
+}
+.sc-layers-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 190px;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 7px;
+  border-radius: var(--sc-radius);
+  background: color-mix(in srgb, var(--sc-stage) 82%, transparent);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 14px 44px -14px rgba(0, 0, 0, 0.6);
+}
+.sc-layers-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: var(--sc-radius-sm);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.sc-layers-item:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+.sc-layers-item input {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  accent-color: var(--sc-brass);
+  cursor: pointer;
+}
+
 /* INSTRUCTIONS */
 .sc-instructions {
   position: absolute;

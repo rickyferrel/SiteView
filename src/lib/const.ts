@@ -17,6 +17,17 @@ export const DEFAULT_MAP_STYLE = "mapbox://styles/mapbox/standard";
 // hundreds (a neighborhood), never the whole 283k-parcel state.
 export const PICKER_MIN_ZOOM = 15;
 
+// Ceiling for an overlay image *after* the browser downscales it. An upload is
+// one indivisible blob — unlike GeoJSON import it can't be batched — and the
+// Amplify SSR Lambda drops request bodies over ~6 MB. Base64 inflates bytes by
+// 4/3, so 3.5 MB of image is ~4.7 MB on the wire, leaving headroom for the JSON
+// envelope. Enforced client-side (with a clear message) and again on the route,
+// because a silently dropped body reads to the operator as "upload is broken".
+export const MAX_LAYER_IMAGE_BYTES = 3_500_000;
+
+// What a browser can decode to a canvas and Mapbox can hand to WebGL.
+export const LAYER_IMAGE_MIMES = ["image/png", "image/jpeg", "image/webp"] as const;
+
 // Build the portal path for a development, e.g. devPath("acme", "lots").
 export function devPath(slug: string, sub = ""): string {
   return sub ? `/d/${slug}/${sub}` : `/d/${slug}`;
