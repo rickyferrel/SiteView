@@ -30,6 +30,13 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   bearing). When `view_locked` is true (operator hand-framed it) the embed uses that view
   exactly; otherwise it auto-fits the lot cluster (`lotClusterBounds` in `MapView.tsx`).
   Import auto-frames `default_view` only while unlocked, so a saved view is never clobbered.
+  Two things then fight that view, both handled in `src/lib/camera.ts`: **terrain** re-frames
+  the camera as DEM tiles arrive (GL JS keeps it above ground, mutating the transform with no
+  `move` event, on only some loads — measured 1 in 6 at a steep pitch), so `holdCamera()` polls
+  and re-asserts the intended shot until the scene settles, releasing forever on the first
+  camera move it didn't cause; and **zoom is pixels-per-meter, not a framing**, so `ViewState.size`
+  records the box the view was framed in and the embed rescales zoom by the viewport ratio
+  (contain-style). Views saved before `size` existed skip the rescale and render as-is.
 
 ## Running / dev gotchas (important)
 
@@ -82,7 +89,7 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
 | Parcel picker | `src/components/ParcelPicker.tsx` (add-a-development flow: pick parcels off satellite, hover card shows acres/value from LIR → `POST .../import`) |
 | GeoJSON upload | `src/components/GeoJsonUpload.tsx` + `src/lib/geojson.ts` (`normalizeGeoJSON()`: polygons only, WGS84 enforced — projected/CAD coordinates rejected with a re-export hint; parcel IDs + lot fields derived from feature properties, `LOT-00n` generated when absent). Second tab on `d/[slug]/parcels`; `POST .../import { mode: "geojson" }` → `importGeoJSON()` in repo.ts. Client and server run the **same normalizer**, so the pre-import summary matches what imports. Files parse fully in the browser (≤250 MB — county-wide exports OK); >2,000 lots routes through `GeoJsonTrimMap.tsx` (picker-style click/box selection over the file's own polygons, palette kept in sync with `ParcelPicker.tsx`) and imports are capped at 2,000 lots, uploaded as ~3 MB batches (prod Lambda body limit ~6 MB) with derived `parcel_id` stamped so batches resolve stable IDs |
 | CSV lot import | `src/components/CsvImport.tsx` (wizard modal on the Lots page: Upload → Match rows → Map columns → Review) + `src/lib/csv.ts` (parser, lot matching, header/type guessing — pure, so the review preview equals what applies). Enriches **existing** lots only (a CSV has no geometry): rows match on lot #/parcel ID/address (exact → loose → bare-number tiers, with per-row manual fix-ups); columns map to core fields, status, existing custom fields, or new fields (type auto-detected); unknown status values can create statuses from the review step. Blank cells never write or erase; "overwrite vs fill blanks" toggle. Applies via `POST .../import { mode: "csv" }` → `applyCsvImport()` in repo.ts (creates fields/statuses idempotently, whitelisted core-column updates, `properties \|\| jsonb` merge so unmapped keys survive) |
-| Opening view | `src/components/OpeningViewEditor.tsx` (hand-frame the embed's opening camera → `PATCH/DELETE .../view`); a step in the add-flow (`d/[slug]/opening-view`) and a section in Map Design |
+| Opening view | `src/components/OpeningViewEditor.tsx` (hand-frame the embed's opening camera → `PATCH/DELETE .../view`); a step in the add-flow (`d/[slug]/opening-view`) and a section in Map Design. `src/lib/camera.ts` (`holdCamera`/`cameraFor`) makes that view survive terrain and any iframe size — shared by the editor and the embed so both resolve it identically |
 | Types / shared | `src/lib/types.ts`, `src/lib/const.ts` (DEV_SLUG), `src/lib/client.ts`, `src/lib/http.ts` |
 | Deploy / infra | `amplify.yml` (build; runs `scripts/write-env.mjs`), `migrate.sql` + `scripts/migrate.mjs` (RDS schema), `HANDOFF.md` (live deploy status), `AWS_SETUP_RUNBOOK.md` |
 
