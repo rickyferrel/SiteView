@@ -5,6 +5,7 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import type { MapConfig, Status, ViewState } from "@/lib/types";
 import { resolveMapStyle, hideLegacyLotLayers, applySatelliteTint, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
+import { cameraFor, holdCamera, readCamera } from "@/lib/camera";
 import { jsend } from "@/lib/client";
 import { cx } from "@/components/ui";
 
@@ -83,6 +84,7 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
   useEffect(() => {
     let cancelled = false;
     let map: mapboxgl.Map | null = null;
+    let releaseHold: (() => void) | null = null;
 
     (async () => {
       const [cRes, pRes] = await Promise.all([
@@ -103,13 +105,18 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
       const view = cfg.development.default_view;
       const appearance = cfg.development.map_appearance ?? DEFAULT_APPEARANCE;
 
+      // Open on the saved view resolved for this box — the same resolution the
+      // embed does — so re-opening the editor shows the shot as it was framed.
+      const el = containerRef.current;
+      const opening = cameraFor(view, el.clientWidth, el.clientHeight);
+
       map = new mapboxgl.Map({
-        container: containerRef.current,
+        container: el,
         style: resolveMapStyle(cfg.development.mapbox_style, appearance.basemap),
-        center: view.center,
-        zoom: view.zoom,
-        pitch: view.pitch,
-        bearing: view.bearing,
+        center: opening.center,
+        zoom: opening.zoom,
+        pitch: opening.pitch,
+        bearing: opening.bearing,
         maxPitch: 85,
         pitchWithRotate: true,
         antialias: true,
@@ -186,6 +193,10 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
           if (b) map.fitBounds(b, { padding: 60, pitch: 30, bearing: 0, maxZoom: 16, duration: 0 });
         }
 
+        // Same hold the embed uses: don't let terrain re-frame the shot out from
+        // under the operator while the DEM loads. Releases on their first move.
+        releaseHold = holdCamera(map, readCamera(map));
+
         syncHud();
         setReady(true);
         setTimeout(() => map?.resize(), 200);
@@ -198,21 +209,25 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
 
     return () => {
       cancelled = true;
+      releaseHold?.();
       map?.remove();
       mapRef.current = null;
     };
   }, [slug]);
 
+  // Capture the camera *and* the box it was framed in — zoom alone doesn't
+  // describe a framing, so the embed needs the reference size to reproduce it
+  // on a taller iframe or a phone.
   function captureView(): ViewState | null {
     const map = mapRef.current;
     if (!map) return null;
-    const c = map.getCenter();
-    return {
-      center: [c.lng, c.lat],
-      zoom: map.getZoom(),
-      pitch: map.getPitch(),
-      bearing: map.getBearing(),
-    };
+    const cam = readCamera(map);
+    const canvas = map.getCanvas();
+    const size: [number, number] = [
+      Math.round(canvas.clientWidth || containerRef.current?.clientWidth || 0),
+      Math.round(canvas.clientHeight || containerRef.current?.clientHeight || 0),
+    ];
+    return { ...cam, ...(size[0] && size[1] ? { size } : {}) };
   }
 
   async function save() {

@@ -5,6 +5,7 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import type { MapConfig, Status, Filter, FieldDef, DataState } from "@/lib/types";
 import { resolveMapStyle, hideLegacyLotLayers, applySatelliteTint, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
+import { cameraFor, holdCamera, readCamera, type Camera } from "@/lib/camera";
 import { money, acres } from "@/lib/format";
 import { videoEmbed, isHttpUrl, type VideoEmbed } from "@/lib/video";
 import VideoPreview from "@/components/VideoPreview";
@@ -90,6 +91,7 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
   useEffect(() => {
     let cancelled = false;
     let map: mapboxgl.Map | null = null;
+    let releaseHold: (() => void) | null = null;
 
     (async () => {
       const [cRes, pRes] = await Promise.all([
@@ -107,17 +109,29 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
       fcRef.current = fc;
 
       mapboxgl.accessToken = cfg.development.mapbox_token;
-      const view = cfg.development.stop_views[stop ?? ""] ?? cfg.development.default_view;
-      const usingNamedStop = !!(stop && cfg.development.stop_views[stop]);
+      const namedStop = stop ? cfg.development.stop_views[stop] : undefined;
+      const view = namedStop ?? cfg.development.default_view;
+      const usingNamedStop = !!namedStop;
       const appearance = cfg.development.map_appearance ?? DEFAULT_APPEARANCE;
 
+      // Resolve the stored view against this container, so a phone-sized iframe
+      // frames the same ground the operator framed in the portal. The container
+      // is 100% of a 100vh wrapper, so the window is a safe stand-in if layout
+      // hasn't settled yet (lazy iframe, hidden tab) and it measures as 0.
+      const el = containerRef.current;
+      const opening = cameraFor(
+        view,
+        el.clientWidth || window.innerWidth,
+        el.clientHeight || window.innerHeight
+      );
+
       map = new mapboxgl.Map({
-        container: containerRef.current,
+        container: el,
         style: resolveMapStyle(cfg.development.mapbox_style, appearance.basemap),
-        center: view.center,
-        zoom: view.zoom,
-        pitch: view.pitch,
-        bearing: view.bearing,
+        center: opening.center,
+        zoom: opening.zoom,
+        pitch: opening.pitch,
+        bearing: opening.bearing,
         maxPitch: 85,
         pitchWithRotate: true,
         antialias: true,
@@ -144,6 +158,13 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
           });
         }
       }
+
+      // Whatever we just set — hand-framed view, named stop, or auto-fit — is
+      // the shot the visitor is supposed to land on. Terrain will try to re-frame
+      // it as DEM tiles arrive (silently, no `move` event, and only on some
+      // loads), so hold it until the scene settles or the visitor takes over.
+      const intended: Camera = readCamera(map);
+      releaseHold = holdCamera(map, intended);
 
       map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), "top-right");
       map.addControl(
@@ -259,6 +280,7 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
 
     return () => {
       cancelled = true;
+      releaseHold?.();
       map?.remove();
       mapRef.current = null;
     };

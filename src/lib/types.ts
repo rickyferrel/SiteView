@@ -5,6 +5,11 @@ export type ViewState = {
   zoom: number;
   pitch: number;
   bearing: number;
+  // Container size (px) the view was framed in. Zoom is pixels-per-meter, so the
+  // same zoom frames ~3x less ground on a phone than on a desktop iframe; the
+  // embed rescales zoom against this reference so the *framing* survives the
+  // trip. Absent on views saved before this existed — those render as-is.
+  size?: [number, number];
 };
 
 // How the embed renders the basemap. "custom" keeps the development's own

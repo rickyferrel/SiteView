@@ -46,6 +46,7 @@ function sanitizeView(b: Partial<ViewState>): ViewState | null {
   const zoom = Number(b.zoom);
   const pitch = Number(b.pitch);
   const bearing = Number(b.bearing);
+  const size = sanitizeSize(b.size);
   if (![lng, lat, zoom, pitch, bearing].every(Number.isFinite)) return null;
   if (Math.abs(lng) > 180 || Math.abs(lat) > 90) return null;
   return {
@@ -53,7 +54,17 @@ function sanitizeView(b: Partial<ViewState>): ViewState | null {
     zoom: clamp(zoom, 0, 22),
     pitch: clamp(pitch, 0, 85),
     bearing: ((bearing % 360) + 360) % 360,
+    ...(size ? { size } : {}),
   };
+}
+
+// The container the view was framed in, so the embed can hold that framing on a
+// different-shaped viewport. Optional — a payload without it just skips rescaling.
+function sanitizeSize(s: unknown): [number, number] | undefined {
+  if (!Array.isArray(s) || s.length !== 2) return undefined;
+  const [w, h] = [Number(s[0]), Number(s[1])];
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w < 50 || h < 50) return undefined;
+  return [Math.round(w), Math.round(h)];
 }
 
 function clamp(n: number, lo: number, hi: number): number {
