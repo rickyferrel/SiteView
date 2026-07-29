@@ -1,14 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import mapboxgl from "mapbox-gl";
-import "mapbox-gl/dist/mapbox-gl.css";
-import type { MapConfig, Status, Layer, Corners } from "@/lib/types";
-import { resolveMapStyle, hideLegacyLotLayers, applySatelliteTint, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
-import { syncLayers, setLayerCoordinates, setLayerOpacity } from "@/lib/mapLayers";
+import type { Layer, Corners } from "@/lib/types";
+import { setLayerCoordinates, setLayerOpacity } from "@/lib/mapLayers";
 import {
-  toMerc,
   fromMerc,
+  toMerc,
   rectFromCorners,
   cornersFromRect,
   scaleRectFromCorner,
@@ -16,6 +13,7 @@ import {
   cornersBbox,
   type Pt,
 } from "@/lib/layers";
+import { useEditorMap } from "@/components/useEditorMap";
 import { jsend } from "@/lib/client";
 import { cx } from "@/components/ui";
 
@@ -23,13 +21,9 @@ import { cx } from "@/components/ui";
  * Pin an image overlay to the ground: drag it into place over the satellite
  * imagery until the render's streets line up with the real ones.
  *
- * **The map is deliberately flat here — pitch 0, terrain off, rotation locked.**
- * Under pitch and terrain, unprojecting a dragged handle back to a ground
- * coordinate is ambiguous (GL JS resolves screen→ground against the DEM, which
- * streams in and changes underneath you), so handles would land somewhere other
- * than where they were dropped. Flattening the camera makes screen↔ground an
- * exact plane projection and sidesteps the whole problem. The operator leaves
- * the editor to check the result in 3D, where the overlay drapes onto terrain.
+ * The map is flat while positioning — pitch 0, terrain off, rotation locked —
+ * so a dragged handle lands exactly where it's dropped. That camera, and the
+ * reasons for it, live in `useEditorMap`.
  *
  * Two modes, one `corners` array:
  *  • **Transform** — move / scale / rotate; stays a rectangle.
@@ -40,14 +34,6 @@ import { cx } from "@/components/ui";
  * rest of the portal uses.
  */
 
-const FILL = "le-fill";
-const LINE = "le-line";
-const LABEL = "le-label";
-
-// Keeps the overlay's grips out from under the floating hint card (top-left)
-// and the command bar (bottom) whenever we frame it.
-const FRAME_PADDING = { top: 96, left: 64, right: 64, bottom: 130 };
-
 type Mode = "transform" | "fine";
 type Drag =
   | { kind: "move"; startCorners: Corners; startMerc: Pt }
@@ -56,15 +42,6 @@ type Drag =
   | { kind: "corner"; index: number };
 
 type Screen = { quad: [number, number][]; rotate: [number, number] | null };
-
-function fillColorExpr(statuses: Status[]) {
-  const def = statuses.find((s) => s.is_default)?.color ?? "#8c3b3b";
-  if (statuses.length === 0) return def;
-  const expr: unknown[] = ["match", ["get", "status"]];
-  for (const s of statuses) expr.push(s.name, s.color);
-  expr.push(def);
-  return expr;
-}
 
 export default function LayerEditor({
   slug,
@@ -79,8 +56,6 @@ export default function LayerEditor({
   onDone: () => void;
   className?: string;
 }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<mapboxgl.Map | null>(null);
   const dragRef = useRef<Drag | null>(null);
 
   // The live corner set. Held in a ref too, so pointer handlers (bound once)
@@ -92,139 +67,47 @@ export default function LayerEditor({
   const [mode, setMode] = useState<Mode>("transform");
   const [lockAspect, setLockAspect] = useState(true);
   const [opacity, setOpacity] = useState(layer.opacity);
+  // Kept alongside the state so the map bootstrap can read the working opacity
+  // without the effect depending on it. Written wherever opacity is set.
+  const opacityRef = useRef(layer.opacity);
   const [screen, setScreen] = useState<Screen>({ quad: [], rotate: null });
-  const [ready, setReady] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
 
-  const setCornersBoth = useCallback((c: Corners) => {
-    cornersRef.current = c;
-    setCorners(c);
-    const map = mapRef.current;
-    if (map) setLayerCoordinates(map, layerRef.current, c);
-  }, []);
+  // Draw the whole stack for context, but force the layer being edited visible
+  // and at the operator's working opacity even if it's hidden in the panel —
+  // you can't align something you can't see.
+  const {
+    containerRef,
+    mapRef,
+    ready,
+    error: mapError,
+    pointerMerc,
+    frame,
+  } = useEditorMap({
+    slug,
+    editKey: layer.id,
+    initialBbox: () => cornersBbox(cornersRef.current),
+    liveLayer: () => ({
+      ...layerRef.current,
+      corners: cornersRef.current,
+      opacity: opacityRef.current,
+    }),
+  });
 
-  // ---- Map bootstrap -------------------------------------------------------
+  const error = saveError ?? mapError;
+  const setError = setSaveError;
 
-  useEffect(() => {
-    let cancelled = false;
-    let map: mapboxgl.Map | null = null;
-
-    (async () => {
-      const [cRes, pRes] = await Promise.all([
-        fetch(`/api/dev/${slug}/config?state=draft`),
-        fetch(`/api/dev/${slug}/parcels?state=draft`),
-      ]);
-      if (!cRes.ok) {
-        if (!cancelled) setError("Couldn't load this development.");
-        return;
-      }
-      const cfg = (await cRes.json()) as MapConfig;
-      const fc = (await pRes.json()) as GeoJSON.FeatureCollection;
-      if (cancelled || !containerRef.current) return;
-
-      mapboxgl.accessToken = cfg.development.mapbox_token;
-      const appearance = cfg.development.map_appearance ?? DEFAULT_APPEARANCE;
-      const [w, s, e, n] = cornersBbox(cornersRef.current);
-
-      map = new mapboxgl.Map({
-        container: containerRef.current,
-        style: resolveMapStyle(cfg.development.mapbox_style, appearance.basemap),
-        bounds: [
-          [w, s],
-          [e, n],
-        ],
-        // Asymmetric padding clears the floating chrome: a corner grip tucked
-        // under the hint card or the command bar can't be grabbed.
-        fitBoundsOptions: { padding: FRAME_PADDING },
-        // Flat and locked: see the note at the top of this file.
-        pitch: 0,
-        bearing: 0,
-        maxPitch: 0,
-        dragRotate: false,
-        pitchWithRotate: false,
-        touchPitch: false,
-        antialias: true,
-      });
-      map.touchZoomRotate.disableRotation();
-      mapRef.current = map;
-      map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right");
-
-      map.on("load", () => {
-        if (!map) return;
-        hideLegacyLotLayers(map);
-
-        const standardCfg = STANDARD_CONFIG[appearance.basemap];
-        if (standardCfg) {
-          for (const [k, v] of Object.entries(standardCfg)) {
-            try {
-              map.setConfigProperty("basemap", k, v);
-            } catch {
-              /* style may not support this config property */
-            }
-          }
-        }
-        applySatelliteTint(map, appearance);
-        // Terrain stays off on purpose — flat ground keeps unproject exact.
-        map.setTerrain(null);
-
-        map.addSource("parcels", { type: "geojson", data: fc, promoteId: "parcel_id" });
-        map.addLayer({
-          id: FILL,
-          type: "fill",
-          source: "parcels",
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          paint: { "fill-color": fillColorExpr(cfg.statuses) as any, "fill-opacity": 0.45, "fill-outline-color": "#ffffff" },
-        });
-        map.addLayer({
-          id: LINE,
-          type: "line",
-          source: "parcels",
-          paint: { "line-color": "#ffffff", "line-width": 1, "line-opacity": 0.55 },
-        });
-        map.addLayer({
-          id: LABEL,
-          type: "symbol",
-          source: "parcels",
-          layout: {
-            "text-field": ["coalesce", ["get", "lot_number"], ""] as unknown as string,
-            "text-size": 12,
-            "text-allow-overlap": false,
-          },
-          paint: { "text-color": "#ffffff", "text-halo-color": "#000000", "text-halo-width": 1, "text-opacity": 0.85 },
-        });
-
-        // Draw the whole stack for context, but force the layer being edited
-        // visible and at the operator's working opacity even if it's hidden in
-        // the panel — you can't align something you can't see.
-        const edited = layerRef.current;
-        const all = (cfg.layers ?? []).map((l) =>
-          l.id === edited.id
-            ? { ...l, visible: true, opacity, corners: cornersRef.current }
-            : l
-        );
-        if (!all.some((l) => l.id === edited.id)) {
-          all.push({ ...edited, visible: true, opacity, corners: cornersRef.current });
-        }
-        syncLayers(map, all, { fill: FILL, label: LABEL });
-
-        setReady(true);
-        setTimeout(() => map?.resize(), 200);
-      });
-    })().catch((err) => {
-      if (!cancelled) setError(String(err instanceof Error ? err.message : err));
-    });
-
-    return () => {
-      cancelled = true;
-      map?.remove();
-      mapRef.current = null;
-    };
-    // Bootstraps once per layer; live corner/opacity changes flow through refs
-    // and the imperative map helpers, never through a re-run of this effect.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug, layer.id]);
+  const setCornersBoth = useCallback(
+    (c: Corners) => {
+      cornersRef.current = c;
+      setCorners(c);
+      const map = mapRef.current;
+      if (map) setLayerCoordinates(map, layerRef.current, c);
+    },
+    [mapRef]
+  );
 
   // ---- Keep the handle overlay glued to the ground -------------------------
 
@@ -256,19 +139,9 @@ export default function LayerEditor({
     return () => {
       map.off("render", paint);
     };
-  }, [ready, corners]);
+  }, [mapRef, ready, corners]);
 
   // ---- Dragging ------------------------------------------------------------
-
-  /** Pointer → ground, in mercator. Exact because the camera is flat. */
-  function pointerMerc(e: { clientX: number; clientY: number }): Pt | null {
-    const map = mapRef.current;
-    const el = containerRef.current;
-    if (!map || !el) return null;
-    const r = el.getBoundingClientRect();
-    const ll = map.unproject([e.clientX - r.left, e.clientY - r.top]);
-    return toMerc([ll.lng, ll.lat]);
-  }
 
   /**
    * Drags run on **window** listeners, not on the SVG or via pointer capture.
@@ -356,16 +229,7 @@ export default function LayerEditor({
   }
 
   function zoomToLayer() {
-    const map = mapRef.current;
-    if (!map) return;
-    const [w, s, e, n] = cornersBbox(cornersRef.current);
-    map.fitBounds(
-      [
-        [w, s],
-        [e, n],
-      ],
-      { padding: FRAME_PADDING, duration: 600 }
-    );
+    frame(cornersBbox(cornersRef.current));
   }
 
   const quad = screen.quad;
@@ -536,6 +400,7 @@ export default function LayerEditor({
               onChange={(e) => {
                 const v = Number(e.target.value);
                 setOpacity(v);
+                opacityRef.current = v;
                 const map = mapRef.current;
                 if (map) setLayerOpacity(map, layerRef.current, v);
               }}

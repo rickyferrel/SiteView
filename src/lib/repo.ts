@@ -964,7 +964,9 @@ export async function createLayer(devId: string, input: LayerInput): Promise<Lay
 }
 
 const LAYER_SCALARS = ["name", "visible", "opacity", "above_lots", "visitor_toggle", "sort_order"] as const;
-const LAYER_JSONB = ["corners", "geometry", "style"] as const;
+// `corners` and `geometry` are whole-value writes — half a geometry is not a
+// geometry. `style` is handled separately below, as a merge.
+const LAYER_JSONB = ["corners", "geometry"] as const;
 
 export async function updateLayer(id: string, patch: Record<string, unknown>): Promise<Layer | null> {
   const sets: string[] = [];
@@ -981,6 +983,13 @@ export async function updateLayer(id: string, patch: Record<string, unknown>): P
       sets.push(`${c} = $${i++}::jsonb`);
       vals.push(JSON.stringify(patch[c]));
     }
+  }
+  if (patch.style !== undefined) {
+    // `||` merges rather than replaces, the same idiom the CSV import uses for
+    // parcel properties: a patch carrying one style key must not blank the rest
+    // back to defaults.
+    sets.push(`style = style || $${i++}::jsonb`);
+    vals.push(JSON.stringify(patch.style));
   }
   if (!sets.length) return getLayer(id);
   vals.push(id);

@@ -1,8 +1,12 @@
 # Map Portal — Map Layers (image overlays + drawn shapes) Handoff
 
-**Status: Pass 1 (image overlays) is built and verified end to end, on `main`-pending — not yet
-pushed. Pass 2 (drawing) is not started**, per the deliberate checkpoint in §9: the alignment UX
-gets confirmed with Ricky before the drawing work is layered on top.
+**Status: both passes are built and verified end to end. Pass 1 (image overlays) and Pass 2
+(drawing — area / line / freehand) are complete.** The §9 checkpoint was cleared by Ricky, who
+asked for the drawing work directly rather than reviewing the alignment UX first.
+
+**Still not live in production:** `npm run migrate` has not been run against RDS, so `layers` and
+`layer_assets` don't exist there. Reads degrade to "no layers" rather than 500ing (see `getLayers`
+in repo.ts), so the portal works — layers just stay dormant until that migration runs.
 
 **Written:** 2026-07-27. Pairs with [CLAUDE.md](CLAUDE.md) (architecture) and
 [HANDOFF.md](HANDOFF.md) (AWS deploy status).
@@ -270,15 +274,59 @@ Ship in two passes so the alignment UX gets confirmed before the drawing work is
 4. ✅ MapView rendering with above/below insertion.
 5. ✅ Upload + downscale, `LayersPanel`, `LayerEditor` with both positioning modes.
 6. ✅ Embed Layers button.
-7. ⬅ **You are here. Stop and show Ricky.** Pin a real render, confirm alignment feels right
-   before continuing. Also still to do before this is live: **push** (nothing is deployed yet) and
-   run `npm run migrate` against RDS so prod gets `layers` + `layer_assets`.
+7. ✅ Checkpoint cleared — Ricky asked for the drawing work directly. Still worth doing on a real
+   render: confirm alignment feels right. **And still required before any of this is live:**
+   `npm run migrate` against RDS so prod gets `layers` + `layer_assets`.
 
-**Pass 2 — drawing** — not started
-8. Polygon / line / freehand capture on the same layer list and rendering path. The storage,
-   validation and rendering for `kind: "shape"` already exist — this is a capture UI plus a
-   "Draw shape" entry point in `LayersPanel`.
-9. Style controls (`style` jsonb: `color`, `width`, `fillOpacity` — already plumbed end to end).
+**Pass 2 — drawing** — ✅ done
+8. ✅ Area / line / freehand capture in `ShapeEditor.tsx`, on the same layer list and rendering
+   path, behind a "Draw shape" menu in `LayersPanel`.
+9. ✅ Style controls in the editor's command bar — presets plus a custom color, width for lines,
+   fill opacity for areas.
+
+### What Pass 2 added, and the calls made building it
+
+- **`src/lib/shapes.ts`** — all the geometry, pure, mirroring how `layers.ts` serves the image
+  editor. The working vertex list is **open** (no repeated closing point); `polygonFrom` closes it
+  and `shapePoints` reopens it, so nothing in between special-cases the seam.
+- **`useEditorMap`** — the flat-camera bootstrap, extracted out of `LayerEditor` and now shared.
+  It was ~110 lines of duplicate otherwise, and the flat camera is the invariant *both* editors'
+  pointer math depends on: two copies is one chance for one of them to quietly regain terrain.
+- **Freehand decides area vs line by whether the stroke ends where it started** (within 28px).
+  Not asked — a sketched pond is naturally a loop and a sketched river never is, and it's one
+  control instead of a mode toggle. The hint text says so outright.
+- **Freehand simplifies in screen pixels, before unprojecting** (Douglas–Peucker, 2px, iterative).
+  In mercator the same stroke would keep wildly different detail depending on the zoom it was drawn
+  at; 2px is below what a hand holds steady, so it only ever removes tremor.
+- **A shape row is created only once it's drawn**, inverting the image flow. Forced: the create API
+  needs valid geometry. The upside is an abandoned sketch leaves nothing behind.
+- **`updateLayer` now merges `style`** (`style || $n::jsonb`) instead of replacing it, so a
+  color-only patch doesn't blank width and fill. `validShapeGeometry` / `sanitizeShapeStyle` moved
+  into `shapes.ts` and now guard both routes; the create route had the looser check.
+
+Verified against a running server, not by inspection — 73 assertions:
+
+- 29 pure-geometry assertions on `shapes.ts` (ring closing, the open/closed round-trip, vertex
+  insert/move/remove with minimums enforced, midpoint indices including the wrap segment,
+  simplify's endpoints/corners/20k-point stack safety, loop detection, validation rejects).
+- 21 API assertions — create area + line, six malformed-geometry rejections, hostile style values
+  clamped, geometry patch, **partial style patch leaves the other keys alone**, publish snapshot
+  carries the geometry, draft edits don't touch the published copy, reorder, delete.
+- 15 real-DOM browser assertions — clicking vertices, Enter closing an area, dragging a vertex
+  (persisted, ring still closed, neighbours untouched), a midpoint drag inserting a vertex,
+  alt-click removing one, a color preset saving without clobbering fill, double-click finishing a
+  line without a duplicate vertex.
+- 4 freehand assertions — a loop becomes an Area and a stroke stays a Line, 90 samples simplify to
+  26 points, the command bar swaps fill for width.
+- 4 embed assertions — shapes render in `/embed`, the visitor Layers chip lists only opted-in
+  layers, and toggling never writes to the DB.
+
+**How they were run** (no test runner exists in this repo, matching Pass 1): there is no Mapbox
+token in the dev container, so the browser suites stub every `*.mapbox.com` request with a minimal
+valid style. GL JS still does the real projection/unprojection, which is all the editors depend on.
+Note that **Playwright resolves routes last-registered-first** — the catch-all has to be registered
+*before* the specific style route or it swallows it. Chromium also needs `--no-proxy-server` here,
+or it sends localhost through the agent proxy and every navigation times out.
 
 ---
 

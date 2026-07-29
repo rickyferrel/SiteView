@@ -1,6 +1,7 @@
 import { updateLayer, deleteLayer } from "@/lib/repo";
 import { ok, fail } from "@/lib/http";
 import { validCorners } from "@/lib/layers";
+import { validShapeGeometry, sanitizeShapeStyle } from "@/lib/shapes";
 import type { ShapeStyle } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -41,13 +42,21 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     patch.corners = body.corners;
   }
   if (body.geometry !== undefined) {
-    const g = body.geometry as GeoJSON.Geometry;
-    if (!g || (g.type !== "Polygon" && g.type !== "LineString")) {
-      return fail("geometry must be a Polygon or LineString");
+    // Geometry the renderer can't draw would store fine and then show up as a
+    // layer that's in the list and invisible on the map — so it's rejected here
+    // rather than left to fail silently downstream.
+    if (!validShapeGeometry(body.geometry)) {
+      return fail("geometry must be a Polygon or LineString with enough points");
     }
-    patch.geometry = g;
+    patch.geometry = body.geometry;
   }
-  if (body.style !== undefined) patch.style = body.style;
+  if (body.style !== undefined) {
+    // Merged into the stored jsonb by updateLayer, so a patch carrying only a
+    // color leaves width and fill alone.
+    const style = sanitizeShapeStyle(body.style);
+    if (Object.keys(style).length === 0) return fail("no recognised style properties");
+    patch.style = style;
+  }
 
   if (Object.keys(patch).length === 0) return fail("nothing to update");
 
