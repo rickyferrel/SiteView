@@ -1,7 +1,7 @@
 "use client";
 
 import type mapboxgl from "mapbox-gl";
-import type { Layer, Corners } from "./types";
+import type { Layer, Corners, ShapeStyle } from "./types";
 import { DEFAULT_SHAPE_STYLE } from "./types";
 
 /**
@@ -168,6 +168,44 @@ export function syncLayers(map: mapboxgl.Map, layers: Layer[], anchors: LayerAnc
 export function setLayerCoordinates(map: mapboxgl.Map, l: Layer, corners: Corners) {
   const src = map.getSource(srcId(l)) as mapboxgl.ImageSource | undefined;
   if (src && typeof src.setCoordinates === "function") src.setCoordinates(corners);
+}
+
+/**
+ * The shape equivalent: push new geometry into an existing source while a vertex
+ * is being dragged. Like `setLayerCoordinates`, this must NOT go through
+ * `syncLayers` — rebuilding the layer stack on every pointer move drops the
+ * source and re-adds it, which flickers and loses the drag.
+ *
+ * Returns false when the geometry changed *type* (an area edited down into a
+ * line, say). A fill layer can't render a LineString, so the caller has to
+ * rebuild rather than mutate.
+ */
+export function setShapeData(
+  map: mapboxgl.Map,
+  l: Layer,
+  geometry: GeoJSON.Geometry
+): boolean {
+  const src = map.getSource(srcId(l)) as mapboxgl.GeoJSONSource | undefined;
+  if (!src || typeof src.setData !== "function") return false;
+  const lid = lyrId(l.id);
+  const drawnAs = map.getLayer(lid)?.type;
+  if (drawnAs && drawnAs !== (geometry.type === "Polygon" ? "fill" : "line")) return false;
+  src.setData({ type: "Feature", geometry, properties: {} });
+  return true;
+}
+
+/** Color / width / fill feedback while the operator drags a style control. */
+export function setShapeStyle(map: mapboxgl.Map, l: Layer, style: ShapeStyle) {
+  const lid = lyrId(l.id);
+  const drawn = map.getLayer(lid);
+  if (!drawn) return;
+  if (drawn.type === "fill") {
+    map.setPaintProperty(lid, "fill-color", style.color);
+    map.setPaintProperty(lid, "fill-opacity", style.fillOpacity * l.opacity);
+  } else if (drawn.type === "line") {
+    map.setPaintProperty(lid, "line-color", style.color);
+    map.setPaintProperty(lid, "line-width", style.width);
+  }
 }
 
 /** Visitor toggle / eye icon — client-side only, never a DB write. */

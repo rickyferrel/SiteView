@@ -5,20 +5,24 @@ import type { Layer, Corners } from "@/lib/types";
 import { jget, jsend } from "@/lib/client";
 import { assetUrl } from "@/lib/mapLayers";
 import { toMerc, rectForAspect, cornersFromRect, type Pt } from "@/lib/layers";
+import { featureCollectionBbox, isClosed, fullShapeStyle, type ShapeTool } from "@/lib/shapes";
 import { prepareLayerImage, ImageTooLargeError, mb } from "@/lib/image";
 import { LAYER_IMAGE_MIMES } from "@/lib/const";
 import LayerEditor from "@/components/LayerEditor";
+import ShapeEditor from "@/components/ShapeEditor";
 import { Section, Button, Eyebrow, SaveState, EmptyState, Skeleton, fieldClass, cx } from "@/components/ui";
 
 /**
  * The Map Design surface for non-parcel map features: a developer's site-plan
- * render pinned onto the map, or (later) a drawn shape standing in for a river
- * or a pond. Lives here rather than on its own nav page because it's part of how
- * the map *looks*, alongside basemap and opening view.
+ * render pinned onto the map, or a drawn shape standing in for a river or a
+ * pond when there's no render to pin. Lives here rather than on its own nav page
+ * because it's part of how the map *looks*, alongside basemap and opening view.
  *
- * A freshly uploaded image is created on the server immediately, framed over the
- * lot cluster, and then positioned. Uploading first means a long alignment
- * session can't lose the upload, and the editor only ever edits a real row.
+ * The two creation flows are deliberately mirror images:
+ *  • **Image** — uploaded and created up front, then positioned, so a long
+ *    alignment session can't lose the file.
+ *  • **Shape** — created only once it's been drawn, because the API needs valid
+ *    geometry to store and an abandoned sketch should leave nothing behind.
  */
 
 type Phase = "idle" | "saving" | "saved";
@@ -29,6 +33,8 @@ export default function LayersPanel({ slug }: { slug: string }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [savedAt, setSavedAt] = useState<string | undefined>();
   const [editing, setEditing] = useState<string | null>(null);
+  // Set while a brand-new shape is being drawn — there's no row to point at yet.
+  const [drawing, setDrawing] = useState<ShapeTool | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
@@ -148,9 +154,12 @@ export default function LayersPanel({ slug }: { slug: string }) {
     });
   }
 
-  const edited = layers.find((l) => l.id === editing && l.kind === "image" && l.corners);
+  const merge = (l: Layer) =>
+    setLayers((cur) => cur.map((x) => (x.id === l.id ? { ...x, ...l } : x)));
 
-  if (edited) {
+  const edited = layers.find((l) => l.id === editing);
+
+  if (edited?.kind === "image" && edited.corners) {
     return (
       <Section
         title={`Positioning · ${edited.name}`}
@@ -160,8 +169,42 @@ export default function LayersPanel({ slug }: { slug: string }) {
           slug={slug}
           layer={edited}
           className="h-[560px] w-full"
-          onSaved={(l) => setLayers((cur) => cur.map((x) => (x.id === l.id ? { ...x, ...l } : x)))}
+          onSaved={merge}
           onDone={() => setEditing(null)}
+        />
+      </Section>
+    );
+  }
+
+  if (drawing || edited?.kind === "shape") {
+    const shape = edited?.kind === "shape" ? edited : null;
+    return (
+      <Section
+        title={shape ? `Editing · ${shape.name}` : "Drawing a shape"}
+        hint={
+          shape
+            ? "Move points to reshape it. Saved as you go."
+            : "Trace the feature over the satellite imagery. It's saved the moment you finish."
+        }
+      >
+        <ShapeEditor
+          slug={slug}
+          layer={shape}
+          tool={drawing ?? (shape && isClosed(shape.geometry) ? "area" : "line")}
+          className="h-[560px] w-full"
+          onCreated={(l) => {
+            // Deliberately leaves `drawing` set: the editor tracks the new row
+            // itself, and swapping to the edit path here would change its
+            // `editKey` and rebuild the map out from under the operator the
+            // instant they finished drawing.
+            setLayers((cur) => [...cur, l]);
+            mark();
+          }}
+          onSaved={merge}
+          onDone={() => {
+            setDrawing(null);
+            setEditing(null);
+          }}
         />
       </Section>
     );
@@ -170,10 +213,11 @@ export default function LayersPanel({ slug }: { slug: string }) {
   return (
     <Section
       title="Map layers"
-      hint="Pin a site-plan render onto the map so the golf course, river and parks show without being drawn as lots. Applies on next preview / publish."
+      hint="Pin a site-plan render onto the map so the golf course, river and parks show without being drawn as lots — or draw the feature yourself when there's no render. Applies on next preview / publish."
       action={
         <div className="flex items-center gap-3">
           <SaveState state={phase} at={savedAt} />
+          <DrawMenu onPick={setDrawing} />
           <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => fileRef.current?.click()}>
             {busy ?? "Add image layer"}
           </Button>
@@ -206,11 +250,14 @@ export default function LayersPanel({ slug }: { slug: string }) {
       ) : layers.length === 0 ? (
         <EmptyState
           title="No layers yet"
-          hint="Upload the developer's site-plan render and pin it to the map. Everything on it — trees, streets, the river, the clubhouse — comes along without being rebuilt as parcel geometry."
+          hint="Upload the developer's site-plan render and pin it to the map. Everything on it — trees, streets, the river, the clubhouse — comes along without being rebuilt as parcel geometry. No render? Draw the pond or the river straight onto the map instead."
           action={
-            <Button variant="brass" size="sm" disabled={!!busy} onClick={() => fileRef.current?.click()}>
-              {busy ?? "Add image layer"}
-            </Button>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button variant="brass" size="sm" disabled={!!busy} onClick={() => fileRef.current?.click()}>
+                {busy ?? "Add image layer"}
+              </Button>
+              <DrawMenu onPick={setDrawing} />
+            </div>
           }
         />
       ) : (
@@ -251,10 +298,7 @@ export default function LayersPanel({ slug }: { slug: string }) {
                         className="h-11 w-11 shrink-0 rounded-[6px] border border-line object-cover"
                       />
                     ) : (
-                      <span
-                        className="h-11 w-11 shrink-0 rounded-[6px] border border-line"
-                        style={{ background: l.style.color }}
-                      />
+                      <ShapeSwatch layer={l} />
                     )}
 
                     <input
@@ -277,11 +321,17 @@ export default function LayersPanel({ slug }: { slug: string }) {
                       <ArrowButton label="Move down" disabled={idx === 0} onClick={() => nudge(l.id, -1)} />
                     </div>
 
-                    {l.kind === "image" && l.corners && (
-                      <Button variant="ghost" size="sm" onClick={() => setEditing(l.id)}>
-                        Position
-                      </Button>
-                    )}
+                    {l.kind === "image"
+                      ? l.corners && (
+                          <Button variant="ghost" size="sm" onClick={() => setEditing(l.id)}>
+                            Position
+                          </Button>
+                        )
+                      : l.geometry && (
+                          <Button variant="ghost" size="sm" onClick={() => setEditing(l.id)}>
+                            Edit shape
+                          </Button>
+                        )}
 
                     <DeleteLayerButton
                       name={l.name}
@@ -349,25 +399,17 @@ async function framingCorners(slug: string, aspect: number): Promise<Corners> {
 
   try {
     const fc = await jget<GeoJSON.FeatureCollection>(`/api/dev/${slug}/parcels?state=draft`);
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const f of fc.features ?? []) {
-      const g = f.geometry;
-      const polys = g?.type === "Polygon" ? [g.coordinates] : g?.type === "MultiPolygon" ? g.coordinates : [];
-      for (const poly of polys)
-        for (const ring of poly)
-          for (const pt of ring) {
-            const [x, y] = toMerc(pt as [number, number]);
-            minX = Math.min(minX, x);
-            minY = Math.min(minY, y);
-            maxX = Math.max(maxX, x);
-            maxY = Math.max(maxY, y);
-          }
-    }
-    if (Number.isFinite(minX) && maxX > minX) {
-      center = [(minX + maxX) / 2, (minY + maxY) / 2];
+    const bbox = featureCollectionBbox(fc);
+    if (bbox) {
+      // toMerc is monotonic in both axes, so the lng/lat bbox corners map
+      // straight onto the mercator ones — note north is the *smaller* merc y.
+      const [w, s, e, n] = bbox;
+      const min = toMerc([w, n]);
+      const max = toMerc([e, s]);
+      center = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2];
       // A touch of margin so the render's own border isn't clipped by the lots.
-      halfW = ((maxX - minX) / 2) * 1.15;
-      halfH = ((maxY - minY) / 2) * 1.15;
+      halfW = ((max[0] - min[0]) / 2) * 1.15;
+      halfH = ((max[1] - min[1]) / 2) * 1.15;
     }
   } catch {
     /* fall through to the opening-view fallback */
@@ -385,6 +427,97 @@ async function framingCorners(slug: string, aspect: number): Promise<Corners> {
 }
 
 /* ---- Small controls ------------------------------------------------------ */
+
+/** Stands in for the image thumbnail: how this shape reads on the map. */
+function ShapeSwatch({ layer }: { layer: Layer }) {
+  const style = fullShapeStyle(layer.style);
+  const area = isClosed(layer.geometry);
+  return (
+    <span className="grid h-11 w-11 shrink-0 place-items-center rounded-[6px] border border-line bg-panel-2">
+      <svg viewBox="0 0 24 24" className="h-7 w-7" aria-hidden="true">
+        {area ? (
+          <path
+            d="M4 9 L12 4 L20 10 L17 19 L7 18 Z"
+            fill={style.color}
+            fillOpacity={style.fillOpacity}
+            stroke={style.color}
+            strokeWidth={1.5}
+            strokeLinejoin="round"
+          />
+        ) : (
+          <path
+            d="M3 18 C 8 18, 8 7, 13 7 S 19 15, 21 6"
+            fill="none"
+            stroke={style.color}
+            // Echo the real line weight without letting a 40px river fill the chip.
+            strokeWidth={Math.max(2, Math.min(7, style.width / 3))}
+            strokeLinecap="round"
+          />
+        )}
+      </svg>
+    </span>
+  );
+}
+
+/**
+ * "Draw shape" and the three input modes behind it. A menu rather than three
+ * buttons because drawing is the fallback path — the image overlay is what
+ * operators reach for first, and it shouldn't have to share top billing with
+ * three siblings.
+ */
+function DrawMenu({ onPick }: { onPick: (t: ShapeTool) => void }) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => {
+      if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+
+  const items: { tool: ShapeTool; label: string; hint: string }[] = [
+    { tool: "area", label: "Area", hint: "Click corners — a pond, a green, a park" },
+    { tool: "line", label: "Line", hint: "Click along a route — a river, a trail" },
+    { tool: "freehand", label: "Freehand", hint: "Drag to sketch it in one stroke" },
+  ];
+
+  return (
+    <div ref={boxRef} className="relative">
+      <Button variant="ghost" size="sm" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+        Draw shape
+      </Button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-[calc(100%+6px)] z-30 w-[248px] overflow-hidden rounded-[var(--radius-sm)] border border-line bg-panel shadow-[var(--shadow-card)]"
+        >
+          {items.map((it) => (
+            <button
+              key={it.tool}
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onPick(it.tool);
+              }}
+              className="block w-full px-3.5 py-2.5 text-left transition hover:bg-panel-2"
+            >
+              <span className="block text-[13px] font-medium text-ink">{it.label}</span>
+              <span className="mt-0.5 block text-[12px] leading-snug text-faint">{it.hint}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function OpacitySlider({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
   const [drag, setDrag] = useState<number | null>(null);

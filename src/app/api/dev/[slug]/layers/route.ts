@@ -1,6 +1,7 @@
 import { getDevelopment, getLayers, createLayer, putAsset } from "@/lib/repo";
 import { ok, fail } from "@/lib/http";
 import { validCorners } from "@/lib/layers";
+import { validShapeGeometry, sanitizeShapeStyle } from "@/lib/shapes";
 import { MAX_LAYER_IMAGE_BYTES, LAYER_IMAGE_MIMES } from "@/lib/const";
 import type { Corners, ShapeStyle } from "@/lib/types";
 
@@ -49,15 +50,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
 
   try {
     if (body.kind === "shape") {
-      const geometry = body.geometry as GeoJSON.Geometry | undefined;
-      if (!geometry || (geometry.type !== "Polygon" && geometry.type !== "LineString")) {
-        return fail("shape layers need a Polygon or LineString geometry");
+      if (!validShapeGeometry(body.geometry)) {
+        return fail("shape layers need a Polygon or LineString geometry with enough points");
       }
       const layer = await createLayer(dev.id, {
         ...common,
         kind: "shape",
-        geometry,
-        style: sanitizeStyle(body.style),
+        geometry: body.geometry,
+        style: sanitizeShapeStyle(body.style),
       });
       return ok(layer);
     }
@@ -107,15 +107,6 @@ function stripDataUrl(s: string): string {
 function clamp01(v: unknown, fallback: number): number {
   const n = Number(v);
   return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
-}
-
-function sanitizeStyle(s: Partial<ShapeStyle> | undefined): Partial<ShapeStyle> {
-  if (!s) return {};
-  const out: Partial<ShapeStyle> = {};
-  if (typeof s.color === "string" && /^#[0-9a-f]{3,8}$/i.test(s.color)) out.color = s.color;
-  if (Number.isFinite(Number(s.width))) out.width = Math.max(0, Math.min(60, Number(s.width)));
-  if (Number.isFinite(Number(s.fillOpacity))) out.fillOpacity = clamp01(s.fillOpacity, 0.55);
-  return out;
 }
 
 function mb(bytes: number): string {
