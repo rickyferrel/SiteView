@@ -4,10 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Layer, Corners } from "@/lib/types";
 import { jget, jsend } from "@/lib/client";
 import { assetUrl } from "@/lib/mapLayers";
-import { toMerc, rectForAspect, cornersFromRect, type Pt } from "@/lib/layers";
+import { toMerc, rectForAspect, cornersFromRect, shapeKindOf, type Pt, type ShapeKind } from "@/lib/layers";
 import { prepareLayerImage, ImageTooLargeError, mb } from "@/lib/image";
 import { LAYER_IMAGE_MIMES } from "@/lib/const";
 import LayerEditor from "@/components/LayerEditor";
+import ShapeEditor from "@/components/ShapeEditor";
 import { Section, Button, Eyebrow, SaveState, EmptyState, Skeleton, fieldClass, cx } from "@/components/ui";
 
 /**
@@ -19,9 +20,15 @@ import { Section, Button, Eyebrow, SaveState, EmptyState, Skeleton, fieldClass, 
  * A freshly uploaded image is created on the server immediately, framed over the
  * lot cluster, and then positioned. Uploading first means a long alignment
  * session can't lose the upload, and the editor only ever edits a real row.
+ *
+ * A drawn shape is the other way round — `ShapeEditor` creates the row the moment
+ * the shape first has enough points to be one. See the note there.
  */
 
 type Phase = "idle" | "saving" | "saved";
+
+/** Which editor is open, if any. `layer: null` → drawing something new. */
+type Drawing = { layer: Layer | null; kind: ShapeKind };
 
 export default function LayersPanel({ slug }: { slug: string }) {
   const [layers, setLayers] = useState<Layer[]>([]);
@@ -29,6 +36,7 @@ export default function LayersPanel({ slug }: { slug: string }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [savedAt, setSavedAt] = useState<string | undefined>();
   const [editing, setEditing] = useState<string | null>(null);
+  const [drawing, setDrawing] = useState<Drawing | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
@@ -150,6 +158,40 @@ export default function LayersPanel({ slug }: { slug: string }) {
 
   const edited = layers.find((l) => l.id === editing && l.kind === "image" && l.corners);
 
+  if (drawing) {
+    const isNew = !drawing.layer;
+    const noun = drawing.kind === "polygon" ? "area" : "line";
+    return (
+      <Section
+        title={isNew ? `Drawing · new ${noun}` : `Editing · ${drawing.layer?.name}`}
+        hint={
+          isNew
+            ? "Trace the feature over the satellite imagery. It saves itself once it has enough points."
+            : "Move, add or remove points. Saved as you go."
+        }
+      >
+        <ShapeEditor
+          // Keyed so switching shapes remounts the map, but *creating* the row
+          // mid-session doesn't — `drawing` deliberately isn't updated on create.
+          key={drawing.layer?.id ?? `new-${drawing.kind}`}
+          slug={slug}
+          layer={drawing.layer}
+          kind={drawing.kind}
+          className="h-[560px] w-full"
+          onCreated={(l) => {
+            setLayers((cur) => [...cur, l]);
+            mark();
+          }}
+          onSaved={(l) => {
+            setLayers((cur) => cur.map((x) => (x.id === l.id ? { ...x, ...l } : x)));
+            mark();
+          }}
+          onDone={() => setDrawing(null)}
+        />
+      </Section>
+    );
+  }
+
   if (edited) {
     return (
       <Section
@@ -170,12 +212,18 @@ export default function LayersPanel({ slug }: { slug: string }) {
   return (
     <Section
       title="Map layers"
-      hint="Pin a site-plan render onto the map so the golf course, river and parks show without being drawn as lots. Applies on next preview / publish."
+      hint="Put the golf course, river and parks on the map without drawing them as lots — pin the developer's site-plan render, or trace a feature by hand. Applies on next preview / publish."
       action={
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           <SaveState state={phase} at={savedAt} />
           <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => fileRef.current?.click()}>
-            {busy ?? "Add image layer"}
+            {busy ?? "Add image"}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setDrawing({ layer: null, kind: "polygon" })}>
+            Draw area
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setDrawing({ layer: null, kind: "line" })}>
+            Draw line
           </Button>
         </div>
       }
@@ -206,11 +254,19 @@ export default function LayersPanel({ slug }: { slug: string }) {
       ) : layers.length === 0 ? (
         <EmptyState
           title="No layers yet"
-          hint="Upload the developer's site-plan render and pin it to the map. Everything on it — trees, streets, the river, the clubhouse — comes along without being rebuilt as parcel geometry."
+          hint="Pin the developer's site-plan render and everything on it — trees, streets, the river, the clubhouse — comes along without being rebuilt as parcel geometry. No render? Trace the features you need: an area for a pond or a park, a line for a river or a trail."
           action={
-            <Button variant="brass" size="sm" disabled={!!busy} onClick={() => fileRef.current?.click()}>
-              {busy ?? "Add image layer"}
-            </Button>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button variant="brass" size="sm" disabled={!!busy} onClick={() => fileRef.current?.click()}>
+                {busy ?? "Add image"}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setDrawing({ layer: null, kind: "polygon" })}>
+                Draw area
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setDrawing({ layer: null, kind: "line" })}>
+                Draw line
+              </Button>
+            </div>
           }
         />
       ) : (
@@ -251,10 +307,7 @@ export default function LayersPanel({ slug }: { slug: string }) {
                         className="h-11 w-11 shrink-0 rounded-[6px] border border-line object-cover"
                       />
                     ) : (
-                      <span
-                        className="h-11 w-11 shrink-0 rounded-[6px] border border-line"
-                        style={{ background: l.style.color }}
-                      />
+                      <ShapeSwatch layer={l} />
                     )}
 
                     <input
@@ -280,6 +333,16 @@ export default function LayersPanel({ slug }: { slug: string }) {
                     {l.kind === "image" && l.corners && (
                       <Button variant="ghost" size="sm" onClick={() => setEditing(l.id)}>
                         Position
+                      </Button>
+                    )}
+
+                    {l.kind === "shape" && l.geometry && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setDrawing({ layer: l, kind: shapeKindOf(l.geometry) })}
+                      >
+                        Edit shape
                       </Button>
                     )}
 
@@ -322,10 +385,10 @@ export default function LayersPanel({ slug }: { slug: string }) {
           </div>
 
           <p className="mt-4 text-[12px] leading-relaxed text-faint">
-            <strong className="font-medium text-graphite">Under lots</strong> puts the render beneath
-            the parcels — the usual choice for a site plan the lots sit on.{" "}
-            <strong className="font-medium text-graphite">Over lots</strong> covers the lot fills but
-            still lets lot numbers read on top.
+            <strong className="font-medium text-graphite">Under lots</strong> puts the layer beneath
+            the parcels — the usual choice for a site plan the lots sit on, or a river they back
+            onto. <strong className="font-medium text-graphite">Over lots</strong> covers the lot
+            fills but still lets lot numbers read on top.
           </p>
         </>
       )}
@@ -385,6 +448,34 @@ async function framingCorners(slug: string, aspect: number): Promise<Corners> {
 }
 
 /* ---- Small controls ------------------------------------------------------ */
+
+/**
+ * Stands in for an image layer's thumbnail. Reads the way the shape renders — an
+ * area as a wash at its own fill opacity, a line as a stroke at its own width —
+ * so the row is identifiable at a glance without opening the editor.
+ */
+function ShapeSwatch({ layer }: { layer: Layer }) {
+  const kind = shapeKindOf(layer.geometry);
+  return (
+    <span className="grid h-11 w-11 shrink-0 place-items-center rounded-[6px] border border-line bg-panel-2">
+      {kind === "polygon" ? (
+        <span
+          className="h-7 w-7 rounded-[3px]"
+          style={{ background: layer.style.color, opacity: Math.max(0.15, layer.style.fillOpacity) }}
+        />
+      ) : (
+        <svg viewBox="0 0 28 28" className="h-7 w-7" fill="none" aria-hidden="true">
+          <path
+            d="M3 21c5-1 5-13 11-13s6 9 11 11"
+            stroke={layer.style.color}
+            strokeWidth={Math.max(1.5, Math.min(6, layer.style.width / 2))}
+            strokeLinecap="round"
+          />
+        </svg>
+      )}
+    </span>
+  );
+}
 
 function OpacitySlider({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
   const [drag, setDrag] = useState<number | null>(null);

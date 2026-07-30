@@ -1,6 +1,6 @@
-import { updateLayer, deleteLayer } from "@/lib/repo";
+import { getLayer, updateLayer, deleteLayer } from "@/lib/repo";
 import { ok, fail } from "@/lib/http";
-import { validCorners } from "@/lib/layers";
+import { validCorners, validShapeGeometry, sanitizeShapeStyle } from "@/lib/layers";
 import type { ShapeStyle } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -41,13 +41,18 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     patch.corners = body.corners;
   }
   if (body.geometry !== undefined) {
-    const g = body.geometry as GeoJSON.Geometry;
-    if (!g || (g.type !== "Polygon" && g.type !== "LineString")) {
-      return fail("geometry must be a Polygon or LineString");
+    if (!validShapeGeometry(body.geometry)) {
+      return fail("geometry must be a Polygon (3+ points) or LineString (2+ points)");
     }
-    patch.geometry = g;
+    patch.geometry = body.geometry;
   }
-  if (body.style !== undefined) patch.style = body.style;
+  if (body.style !== undefined) {
+    // Merged, not replaced: the shape editor patches one control at a time, and
+    // a bare `style` write would drop the two the operator didn't just touch.
+    const current = (await getLayer(id))?.style;
+    if (!current) return fail("layer not found", 404);
+    patch.style = { ...current, ...sanitizeShapeStyle(body.style) };
+  }
 
   if (Object.keys(patch).length === 0) return fail("nothing to update");
 

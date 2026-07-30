@@ -14,7 +14,7 @@
 // screen↔ground is an exact plane projection and dragged handles land where the
 // operator drops them.
 
-import type { Corners } from "./types";
+import type { Corners, ShapeStyle } from "./types";
 
 export type Pt = [number, number]; // mercator [x, y] — x east, y *south*
 
@@ -169,6 +169,104 @@ export function cornersBbox(c: Corners): [number, number, number, number] {
   const lngs = c.map((p) => p[0]);
   const lats = c.map((p) => p[1]);
   return [Math.min(...lngs), Math.min(...lats), Math.max(...lngs), Math.max(...lats)];
+}
+
+/* ---- Drawn shapes -------------------------------------------------------- */
+// Shape layers are a plain vertex list in lng/lat, not a rectangle, so none of
+// the mercator rect math above applies to them. These helpers are the single
+// place that knows how a vertex list maps onto GeoJSON — the editor, the API
+// route and the renderer all read a shape through them, so a polygon's implicit
+// closing point can't be counted twice in one place and dropped in another.
+
+export type ShapeKind = "polygon" | "line";
+
+/** Fewest vertices that make a drawable shape. Below this, nothing is saved. */
+export const MIN_SHAPE_POINTS: Record<ShapeKind, number> = { polygon: 3, line: 2 };
+
+export function shapeKindOf(g: GeoJSON.Geometry | null | undefined): ShapeKind {
+  return g?.type === "Polygon" ? "polygon" : "line";
+}
+
+/**
+ * Vertex list → GeoJSON, or `null` when there aren't enough points yet. A
+ * polygon's ring is closed here and **only** here: `pts` never carries the
+ * duplicate closing vertex, so it can't show up as a stacked pair of grips.
+ */
+export function shapeGeometry(
+  kind: ShapeKind,
+  pts: [number, number][]
+): GeoJSON.Geometry | null {
+  if (pts.length < MIN_SHAPE_POINTS[kind]) return null;
+  if (kind === "line") return { type: "LineString", coordinates: pts };
+  return { type: "Polygon", coordinates: [[...pts, pts[0]]] };
+}
+
+/** GeoJSON → editable vertex list, dropping a polygon's closing vertex. */
+export function shapePoints(g: GeoJSON.Geometry | null | undefined): [number, number][] {
+  if (!g) return [];
+  if (g.type === "LineString") return g.coordinates.map((c) => [c[0], c[1]]);
+  if (g.type !== "Polygon") return [];
+  const ring = (g.coordinates[0] ?? []).map((c) => [c[0], c[1]] as [number, number]);
+  const first = ring[0];
+  const last = ring[ring.length - 1];
+  if (ring.length > 1 && first && last && first[0] === last[0] && first[1] === last[1]) {
+    return ring.slice(0, -1);
+  }
+  return ring;
+}
+
+/** lng/lat bounding box of a drawn shape — frames the editor on open. */
+export function shapeBbox(
+  g: GeoJSON.Geometry | null | undefined
+): [number, number, number, number] | null {
+  const pts = shapePoints(g);
+  if (!pts.length) return null;
+  const lngs = pts.map((p) => p[0]);
+  const lats = pts.map((p) => p[1]);
+  return [Math.min(...lngs), Math.min(...lats), Math.max(...lngs), Math.max(...lats)];
+}
+
+/**
+ * Gate for a shape write. The renderer draws a Polygon as a fill and anything
+ * else as a line, and a degenerate ring (two points, or coordinates that aren't
+ * pairs of finite numbers) draws as nothing at all rather than failing — so an
+ * under-length shape has to be refused here or it becomes an invisible layer the
+ * operator can't explain.
+ */
+export function validShapeGeometry(v: unknown): v is GeoJSON.Geometry {
+  const g = v as GeoJSON.Geometry | null;
+  if (!g || (g.type !== "Polygon" && g.type !== "LineString")) return false;
+  const ring = g.type === "Polygon" ? g.coordinates[0] : g.coordinates;
+  if (!Array.isArray(ring)) return false;
+  const ok = ring.every(
+    (p) =>
+      Array.isArray(p) &&
+      p.length >= 2 &&
+      Number.isFinite(Number(p[0])) &&
+      Number.isFinite(Number(p[1])) &&
+      Math.abs(Number(p[0])) <= 180 &&
+      Math.abs(Number(p[1])) <= 90
+  );
+  if (!ok) return false;
+  // A closed ring repeats its first vertex, so a triangle arrives as 4 points.
+  return ring.length >= (g.type === "Polygon" ? 4 : 2);
+}
+
+/**
+ * Shared by both write routes. Style is operator input that lands in a jsonb
+ * column and then goes straight into a Mapbox paint property, so a bad colour
+ * string is a broken map layer rather than a validation error — hence the
+ * whitelist rather than a cast.
+ */
+export function sanitizeShapeStyle(s: Partial<ShapeStyle> | undefined): Partial<ShapeStyle> {
+  if (!s) return {};
+  const out: Partial<ShapeStyle> = {};
+  if (typeof s.color === "string" && /^#[0-9a-f]{3,8}$/i.test(s.color)) out.color = s.color;
+  if (Number.isFinite(Number(s.width))) out.width = Math.max(0, Math.min(60, Number(s.width)));
+  if (Number.isFinite(Number(s.fillOpacity))) {
+    out.fillOpacity = Math.max(0, Math.min(1, Number(s.fillOpacity)));
+  }
+  return out;
 }
 
 /** Reject anything that would bowtie the texture or NaN out the source. */
