@@ -217,16 +217,32 @@ export type Corners = [
   [number, number],
 ];
 
+// How a line is painted. "solid" is one flat stroke — right for a boundary or a
+// trail. "river" paints the same vertex list in three passes (soft dark bank,
+// water body, light sheen just off the middle) so it reads as water rather than
+// as a line someone drew. LineString only: an area is always a flat fill.
+export type LineLook = "solid" | "river";
+
 export type ShapeStyle = {
   color: string;
   width: number; // line width in px (LineString only)
   fillOpacity: number; // 0..1 (Polygon only)
+  look: LineLook; // LineString only
+  // Text drawn on the shape itself: along the line for a line, at the centroid
+  // for an area. "" → no label layer at all, which is the default.
+  label: string;
+  labelSize: number; // px
+  labelColor: string; // halo is derived from it, so text stays legible either way
 };
 
 export const DEFAULT_SHAPE_STYLE: ShapeStyle = {
   color: "#4a7fb5",
   width: 6,
   fillOpacity: 0.55,
+  look: "solid",
+  label: "",
+  labelSize: 14,
+  labelColor: "#ffffff",
 };
 
 export type Layer = {

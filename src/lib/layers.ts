@@ -14,7 +14,7 @@
 // screen↔ground is an exact plane projection and dragged handles land where the
 // operator drops them.
 
-import type { Corners, ShapeStyle } from "./types";
+import type { Corners, ShapeStyle, LineLook } from "./types";
 
 export type Pt = [number, number]; // mercator [x, y] — x east, y *south*
 
@@ -252,21 +252,82 @@ export function validShapeGeometry(v: unknown): v is GeoJSON.Geometry {
   return ring.length >= (g.type === "Polygon" ? 4 : 2);
 }
 
+/** Longest label we'll draw on a shape — past this it's a paragraph, not a name. */
+export const MAX_SHAPE_LABEL = 80;
+
+const HEX = /^#[0-9a-f]{3,8}$/i;
+const LOOKS: LineLook[] = ["solid", "river"];
+
 /**
  * Shared by both write routes. Style is operator input that lands in a jsonb
  * column and then goes straight into a Mapbox paint property, so a bad colour
  * string is a broken map layer rather than a validation error — hence the
  * whitelist rather than a cast.
+ *
+ * `label` is deliberately kept when it's empty: "" is how the operator clears
+ * the text, and both routes merge this over the stored style.
  */
 export function sanitizeShapeStyle(s: Partial<ShapeStyle> | undefined): Partial<ShapeStyle> {
   if (!s) return {};
   const out: Partial<ShapeStyle> = {};
-  if (typeof s.color === "string" && /^#[0-9a-f]{3,8}$/i.test(s.color)) out.color = s.color;
+  if (typeof s.color === "string" && HEX.test(s.color)) out.color = s.color;
   if (Number.isFinite(Number(s.width))) out.width = Math.max(0, Math.min(60, Number(s.width)));
   if (Number.isFinite(Number(s.fillOpacity))) {
     out.fillOpacity = Math.max(0, Math.min(1, Number(s.fillOpacity)));
   }
+  if (LOOKS.includes(s.look as LineLook)) out.look = s.look;
+  if (typeof s.label === "string") out.label = s.label.trim().slice(0, MAX_SHAPE_LABEL);
+  if (Number.isFinite(Number(s.labelSize))) {
+    out.labelSize = Math.max(8, Math.min(48, Number(s.labelSize)));
+  }
+  if (typeof s.labelColor === "string" && HEX.test(s.labelColor)) out.labelColor = s.labelColor;
   return out;
+}
+
+/* ---- Colour ---------------------------------------------------------------- */
+// The river look and the label halo are both *derived* from the one colour the
+// operator picked, so a river is one swatch click rather than three, and a label
+// can't be typed into invisibility. Kept here (pure) so the editor preview and
+// the embed compute the same shades.
+
+function parseHex(hex: string): [number, number, number] | null {
+  const h = hex.replace("#", "");
+  const s =
+    h.length === 3 || h.length === 4
+      ? h.slice(0, 3).split("").map((c) => c + c).join("")
+      : h.length >= 6
+        ? h.slice(0, 6)
+        : null;
+  if (!s || !/^[0-9a-f]{6}$/i.test(s)) return null;
+  const n = parseInt(s, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+const hex2 = (n: number) => Math.round(Math.max(0, Math.min(255, n))).toString(16).padStart(2, "0");
+
+/**
+ * Mix a colour toward white (`amount` > 0) or black (`amount` < 0), by fraction.
+ * Unparseable input is returned untouched — a bad colour is the renderer's
+ * problem to ignore, not something to throw over mid-drag.
+ */
+export function shade(hex: string, amount: number): string {
+  const rgb = parseHex(hex);
+  if (!rgb) return hex;
+  const t = amount < 0 ? 0 : 255;
+  const k = Math.min(1, Math.abs(amount));
+  return "#" + rgb.map((c) => hex2(c + (t - c) * k)).join("");
+}
+
+/** Perceived brightness, 0..1 (Rec. 601 weights). */
+export function luminance(hex: string): number {
+  const rgb = parseHex(hex);
+  if (!rgb) return 1;
+  return (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
+}
+
+/** Halo that keeps `hex` text readable: dark behind light text, light behind dark. */
+export function haloFor(hex: string): string {
+  return luminance(hex) > 0.55 ? "#10141b" : "#ffffff";
 }
 
 /** Reject anything that would bowtie the texture or NaN out the source. */

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Layer, Corners } from "@/lib/types";
 import { jget, jsend } from "@/lib/client";
 import { assetUrl } from "@/lib/mapLayers";
-import { toMerc, rectForAspect, cornersFromRect, shapeKindOf, type Pt, type ShapeKind } from "@/lib/layers";
+import { toMerc, rectForAspect, cornersFromRect, shapeKindOf, shade, type Pt, type ShapeKind } from "@/lib/layers";
 import { prepareLayerImage, ImageTooLargeError, mb } from "@/lib/image";
 import { LAYER_IMAGE_MIMES } from "@/lib/const";
 import LayerEditor from "@/components/LayerEditor";
@@ -387,8 +387,12 @@ export default function LayersPanel({ slug }: { slug: string }) {
           <p className="mt-4 text-[12px] leading-relaxed text-faint">
             <strong className="font-medium text-graphite">Under lots</strong> puts the layer beneath
             the parcels — the usual choice for a site plan the lots sit on, or a river they back
-            onto. <strong className="font-medium text-graphite">Over lots</strong> covers the lot
-            fills but still lets lot numbers read on top.
+            onto. <strong className="font-medium text-graphite">Over lots</strong>{" "}
+            covers the lot fills but still lets lot numbers read on top. Inside a drawn
+            shape&rsquo;s editor, a line
+            can be painted as a <strong className="font-medium text-graphite">river</strong> and
+            either kind can carry <strong className="font-medium text-graphite">text</strong> drawn
+            onto the map — along the line, or across the middle of an area.
           </p>
         </>
       )}
@@ -449,13 +453,18 @@ async function framingCorners(slug: string, aspect: number): Promise<Corners> {
 
 /* ---- Small controls ------------------------------------------------------ */
 
+/** The meander both line swatches are drawn along. */
+const SWATCH_LINE = "M3 21c5-1 5-13 11-13s6 9 11 11";
+
 /**
  * Stands in for an image layer's thumbnail. Reads the way the shape renders — an
- * area as a wash at its own fill opacity, a line as a stroke at its own width —
- * so the row is identifiable at a glance without opening the editor.
+ * area as a wash at its own fill opacity, a line as a stroke at its own width,
+ * a river as its three banded passes — so the row is identifiable at a glance
+ * without opening the editor.
  */
 function ShapeSwatch({ layer }: { layer: Layer }) {
   const kind = shapeKindOf(layer.geometry);
+  const w = Math.max(1.5, Math.min(6, layer.style.width / 2));
   return (
     <span className="grid h-11 w-11 shrink-0 place-items-center rounded-[6px] border border-line bg-panel-2">
       {kind === "polygon" ? (
@@ -465,12 +474,25 @@ function ShapeSwatch({ layer }: { layer: Layer }) {
         />
       ) : (
         <svg viewBox="0 0 28 28" className="h-7 w-7" fill="none" aria-hidden="true">
-          <path
-            d="M3 21c5-1 5-13 11-13s6 9 11 11"
-            stroke={layer.style.color}
-            strokeWidth={Math.max(1.5, Math.min(6, layer.style.width / 2))}
-            strokeLinecap="round"
-          />
+          {layer.style.look === "river" && (
+            <path
+              d={SWATCH_LINE}
+              stroke={shade(layer.style.color, -0.45)}
+              strokeWidth={w + 3}
+              strokeLinecap="round"
+              opacity={0.55}
+            />
+          )}
+          <path d={SWATCH_LINE} stroke={layer.style.color} strokeWidth={w} strokeLinecap="round" />
+          {layer.style.look === "river" && (
+            <path
+              d={SWATCH_LINE}
+              stroke={shade(layer.style.color, 0.55)}
+              strokeWidth={Math.max(0.6, w * 0.3)}
+              strokeLinecap="round"
+              opacity={0.55}
+            />
+          )}
         </svg>
       )}
     </span>

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
-import type { MapConfig, Status, Layer, ShapeStyle } from "@/lib/types";
+import type { MapConfig, Status, Layer, ShapeStyle, LineLook } from "@/lib/types";
 import {
   resolveMapStyle,
   hideLegacyLotLayers,
@@ -12,8 +12,15 @@ import {
   DEFAULT_SHAPE_STYLE,
   STANDARD_CONFIG,
 } from "@/lib/types";
-import { syncLayers } from "@/lib/mapLayers";
-import { shapeGeometry, shapePoints, shapeBbox, MIN_SHAPE_POINTS, type ShapeKind } from "@/lib/layers";
+import { syncLayers, renderShape } from "@/lib/mapLayers";
+import {
+  shapeGeometry,
+  shapePoints,
+  shapeBbox,
+  MIN_SHAPE_POINTS,
+  MAX_SHAPE_LABEL,
+  type ShapeKind,
+} from "@/lib/layers";
 import { jsend } from "@/lib/client";
 import { cx } from "@/components/ui";
 
@@ -41,9 +48,10 @@ import { cx } from "@/components/ui";
  * nothing — creating one up front would leave an undrawable row behind every
  * time an operator opened the tool and changed their mind.
  *
- * What renders here is what the embed renders: the preview layer below is built
- * to match `mapLayers.ts` exactly — Polygon as a fill, LineString as a line — so
- * a shape doesn't gain an outline in the editor that the visitor never sees.
+ * What renders here is what the embed renders: the preview goes through
+ * `renderShape()` — the same spec builder `mapLayers.ts` uses for the real thing
+ * — so a shape can't gain an outline, a look or a label in the editor that the
+ * visitor never sees.
  */
 
 const FILL = "se-fill";
@@ -54,14 +62,27 @@ const PREVIEW_SRC = "se-shape-src";
 const PREVIEW_ID = "se-shape";
 
 // Clears the floating hint card (top-left) and the command bar (bottom) when we
-// frame an existing shape, so its grips aren't born under the chrome.
-const FRAME_PADDING = { top: 96, left: 64, right: 64, bottom: 150 };
+// frame an existing shape, so its grips aren't born under the chrome. The bar is
+// two rows — shape, then the text drawn on it — hence the deep bottom inset.
+const FRAME_PADDING = { top: 96, left: 64, right: 64, bottom: 196 };
 
 // Screen-space slop, in px. CLOSE_PX is how near the first vertex a click has to
 // land to close a polygon; DEDUPE_PX drops the second click of a double-click,
 // which would otherwise leave a zero-length segment behind at the finish point.
 const CLOSE_PX = 12;
 const DEDUPE_PX = 6;
+
+// A line's paint recipe. "River" is three passes derived from the one colour
+// (see `shapeLayerSpecs`); everything else about the shape is unchanged, so it's
+// a look, not a kind — an operator can flip a drawn creek to solid and back.
+const LOOKS: { value: LineLook; label: string; hint: string }[] = [
+  { value: "solid", label: "Solid", hint: "One flat stroke — a trail, a boundary, a fence line." },
+  {
+    value: "river",
+    label: "River",
+    hint: "Soft dark banks and a lighter centre, so the line reads as water.",
+  },
+];
 
 const SWATCHES: { color: string; label: string }[] = [
   { color: "#4a7fb5", label: "Water" },
@@ -138,8 +159,13 @@ export default function ShapeEditor({
   const hoverRef = useRef(hover);
   const phaseRef = useRef(phase);
 
-  const [name, setName] = useState(layer?.name ?? (kind === "polygon" ? "Area" : "Line"));
+  // Placeholder name until the operator types one — or until they label the shape
+  // on the map, which `commitLabel` adopts as the name while it's still this.
+  const defaultName = kind === "polygon" ? "Area" : "Line";
+  const [name, setName] = useState(layer?.name ?? defaultName);
   const nameRef = useRef(name);
+  // What the server last heard, so leaving the field untouched isn't a write.
+  const committedNameRef = useRef(name);
   const [style, setStyle] = useState<ShapeStyle>({ ...DEFAULT_SHAPE_STYLE, ...(layer?.style ?? {}) });
   const styleRef = useRef(style);
 
@@ -159,28 +185,49 @@ export default function ShapeEditor({
   const minPts = MIN_SHAPE_POINTS[kind];
 
   // ---- Preview: the shape as the embed will draw it -------------------------
+  // Two paths, because they run at different rates. Geometry changes every drag
+  // frame and only needs the source refreshed; a style change can add or drop
+  // whole layers (solid ↔ river is three passes instead of one, a typed label is
+  // a symbol layer that didn't exist), so it rebuilds through the shared builder.
 
   const paintPreview = useCallback(() => {
-    const map = mapRef.current;
-    const src = map?.getSource(PREVIEW_SRC) as mapboxgl.GeoJSONSource | undefined;
-    if (!map || !src) return;
+    const src = mapRef.current?.getSource(PREVIEW_SRC) as mapboxgl.GeoJSONSource | undefined;
+    if (!src) return;
     const g = shapeGeometry(kind, ptsRef.current);
     src.setData(
       g
         ? { type: "Feature", geometry: g, properties: {} }
         : { type: "FeatureCollection", features: [] }
     );
-    if (!map.getLayer(PREVIEW_ID)) return;
-    const s = styleRef.current;
-    if (kind === "polygon") {
-      map.setPaintProperty(PREVIEW_ID, "fill-color", s.color);
-      map.setPaintProperty(PREVIEW_ID, "fill-opacity", s.fillOpacity * layerOpacity);
-    } else {
-      map.setPaintProperty(PREVIEW_ID, "line-color", s.color);
-      map.setPaintProperty(PREVIEW_ID, "line-width", s.width);
-      map.setPaintProperty(PREVIEW_ID, "line-opacity", layerOpacity);
-    }
-  }, [kind, layerOpacity]);
+  }, [kind]);
+
+  const restylePreview = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || !map.getSource(PREVIEW_SRC)) return;
+    // The spec builder only reads `geometry.type`, so an empty stub is enough to
+    // pick fill-vs-line while the shape is still short of its first valid point.
+    const stub: GeoJSON.Geometry =
+      kind === "polygon"
+        ? { type: "Polygon", coordinates: [] }
+        : { type: "LineString", coordinates: [] };
+    // Preview rides the same anchors the real layer will: an under-lots shape is
+    // already correctly occluded, and its text already sits with the lot numbers.
+    const bodyAnchor = aboveLots ? LABEL : FILL;
+    renderShape(
+      map,
+      {
+        baseId: PREVIEW_ID,
+        source: PREVIEW_SRC,
+        geometry: stub,
+        style: styleRef.current,
+        opacity: layerOpacity,
+      },
+      {
+        body: map.getLayer(bodyAnchor) ? bodyAnchor : undefined,
+        label: map.getLayer(LABEL) ? LABEL : undefined,
+      }
+    );
+  }, [kind, aboveLots, layerOpacity]);
 
   const setPtsBoth = useCallback(
     (next: [number, number][]) => {
@@ -350,22 +397,8 @@ export default function ShapeEditor({
           { fill: FILL, label: LABEL }
         );
 
-        // Preview rides the same anchor the real layer will, so an under-lots
-        // shape is already correctly occluded while it's being drawn.
-        const before = map.getLayer(aboveLots ? LABEL : FILL) ? (aboveLots ? LABEL : FILL) : undefined;
         map.addSource(PREVIEW_SRC, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        map.addLayer(
-          kind === "polygon"
-            ? { id: PREVIEW_ID, type: "fill", source: PREVIEW_SRC, paint: { "fill-color": styleRef.current.color, "fill-opacity": styleRef.current.fillOpacity * layerOpacity } }
-            : {
-                id: PREVIEW_ID,
-                type: "line",
-                source: PREVIEW_SRC,
-                layout: { "line-cap": "round", "line-join": "round" },
-                paint: { "line-color": styleRef.current.color, "line-width": styleRef.current.width, "line-opacity": layerOpacity },
-              },
-          before
-        );
+        restylePreview();
         paintPreview();
 
         setReady(true);
@@ -628,19 +661,37 @@ export default function ShapeEditor({
 
   // ---- Style / name commits ------------------------------------------------
 
-  function commitStyle(patch: Partial<ShapeStyle>) {
+  /** On-map + local only. For controls that fire continuously: sliders, typing. */
+  function previewStyle(patch: Partial<ShapeStyle>) {
     const next = { ...styleRef.current, ...patch };
     styleRef.current = next;
     setStyle(next);
-    paintPreview();
-    queue({ style: next });
+    restylePreview();
+  }
+
+  function commitStyle(patch: Partial<ShapeStyle>) {
+    previewStyle(patch);
+    queue({ style: styleRef.current });
   }
 
   function commitName(v: string) {
-    const trimmed = v.trim() || (kind === "polygon" ? "Area" : "Line");
+    const trimmed = v.trim() || defaultName;
     nameRef.current = trimmed;
     setName(trimmed);
+    if (committedNameRef.current === trimmed) return; // blurred without editing
+    committedNameRef.current = trimmed;
+    // Before the row exists there's nothing to PATCH; the create call reads
+    // `nameRef`, which is already current.
     if (layerIdRef.current) queue({ name: trimmed });
+  }
+
+  function commitLabel(v: string) {
+    const label = v.trim();
+    // A stack of layers called "Line" is nobody's intent: if the operator hasn't
+    // named this one, the text they just drew on the map is the best name going.
+    // Named first so a shape created by this same keystroke is POSTed named.
+    if (label && nameRef.current === defaultName) commitName(label);
+    commitStyle({ label });
   }
 
   async function done() {
@@ -769,151 +820,237 @@ export default function ShapeEditor({
         </div>
       )}
 
-      {/* Command bar */}
+      {/* Command bar: shape on the top row, the text drawn on it underneath. */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 p-4">
-        <div className="glass-dark pointer-events-auto mx-auto flex max-w-[900px] flex-wrap items-center gap-x-4 gap-y-3 rounded-[var(--radius-lg)] px-4 py-3">
-          <input
-            defaultValue={name}
-            onBlur={(e) => e.target.value !== name && commitName(e.target.value)}
-            aria-label="Shape name"
-            placeholder={kind === "polygon" ? "Area name" : "Line name"}
-            className="h-8 w-[9.5rem] rounded-[var(--radius-sm)] border border-white/15 bg-white/[0.06] px-2.5 text-[13px] font-medium text-white placeholder:text-white/35 focus:border-white/30 focus:outline-none"
-          />
+        <div className="glass-dark pointer-events-auto mx-auto flex max-w-[960px] flex-col gap-2.5 rounded-[var(--radius-lg)] px-4 py-3">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+            <input
+              value={name}
+              onChange={(e) => {
+                // Mirrored into the ref as it's typed: the shape can be created
+                // by the very next click, and the create call reads the ref.
+                nameRef.current = e.target.value;
+                setName(e.target.value);
+              }}
+              onBlur={(e) => commitName(e.target.value)}
+              aria-label="Shape name"
+              placeholder={kind === "polygon" ? "Area name" : "Line name"}
+              className="h-8 w-[9.5rem] rounded-[var(--radius-sm)] border border-white/15 bg-white/[0.06] px-2.5 text-[13px] font-medium text-white placeholder:text-white/35 focus:border-white/30 focus:outline-none"
+            />
 
-          <div className="flex items-center gap-1.5">
-            {SWATCHES.map((s) => (
-              <button
-                key={s.color}
-                onClick={() => commitStyle({ color: s.color })}
-                aria-label={s.label}
-                title={s.label}
-                aria-pressed={style.color.toLowerCase() === s.color.toLowerCase()}
-                className={cx(
-                  "h-6 w-6 rounded-full border transition",
-                  style.color.toLowerCase() === s.color.toLowerCase()
-                    ? "border-white ring-2 ring-white/30"
-                    : "border-white/25 hover:border-white/60"
-                )}
-                style={{ background: s.color }}
-              />
-            ))}
-            <label
-              className="relative h-6 w-6 cursor-pointer overflow-hidden rounded-full border border-white/25 transition hover:border-white/60"
-              title="Custom colour"
-            >
-              <span
-                className="absolute inset-0"
-                style={{ background: "conic-gradient(#c25b4e,#b59a6a,#5c8f5c,#4a7fb5,#7a5ea8,#c25b4e)" }}
-              />
-              <input
-                type="color"
-                value={style.color}
-                onChange={(e) => commitStyle({ color: e.target.value })}
-                className="absolute inset-0 cursor-pointer opacity-0"
-                aria-label="Custom colour"
-              />
-            </label>
-          </div>
-
-          {kind === "line" ? (
-            <label className="flex min-w-[140px] flex-1 items-center gap-2.5">
-              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/40">Width</span>
-              <input
-                type="range"
-                min={1}
-                max={40}
-                step={1}
-                value={style.width}
-                onChange={(e) => {
-                  const width = Number(e.target.value);
-                  styleRef.current = { ...styleRef.current, width };
-                  setStyle(styleRef.current);
-                  paintPreview();
-                }}
-                onPointerUp={() => commitStyle({ width: styleRef.current.width })}
-                onKeyUp={() => commitStyle({ width: styleRef.current.width })}
-                className="h-1 flex-1 accent-[#d8b26a]"
-                aria-label="Line width"
-              />
-              <span className="w-8 shrink-0 text-right font-mono text-[11px] text-white/70 tabular-nums">
-                {style.width}
-              </span>
-            </label>
-          ) : (
-            <label className="flex min-w-[140px] flex-1 items-center gap-2.5">
-              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/40">Fill</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={style.fillOpacity}
-                onChange={(e) => {
-                  const fillOpacity = Number(e.target.value);
-                  styleRef.current = { ...styleRef.current, fillOpacity };
-                  setStyle(styleRef.current);
-                  paintPreview();
-                }}
-                onPointerUp={() => commitStyle({ fillOpacity: styleRef.current.fillOpacity })}
-                onKeyUp={() => commitStyle({ fillOpacity: styleRef.current.fillOpacity })}
-                className="h-1 flex-1 accent-[#d8b26a]"
-                aria-label="Fill opacity"
-              />
-              <span className="w-9 shrink-0 text-right font-mono text-[11px] text-white/70 tabular-nums">
-                {Math.round(style.fillOpacity * 100)}%
-              </span>
-            </label>
-          )}
-
-          <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
-            <span className="font-mono text-[11px] tracking-[0.1em] text-white/45" aria-live="polite">
-              {saving
-                ? "SAVING"
-                : dirty
-                  ? "UNSAVED"
-                  : exists
-                    ? "SAVED"
-                    : `${pts.length}/${minPts} POINTS`}
-            </span>
-
-            {phase === "draw" ? (
-              <>
+            <div className="flex items-center gap-1.5">
+              {SWATCHES.map((s) => (
                 <button
-                  onClick={cancelDraw}
-                  className="inline-flex h-9 items-center rounded-[var(--radius-sm)] px-3 text-[13px] font-medium text-white/60 transition hover:bg-white/[0.08] hover:text-white"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={finish}
-                  disabled={!enough}
-                  className="inline-flex h-9 items-center gap-2 rounded-[var(--radius-sm)] bg-[linear-gradient(180deg,#8b6d3d,#6a5230)] px-5 text-[13px] font-semibold text-white shadow-[0_1px_2px_rgba(122,96,52,0.45)] transition hover:brightness-110 disabled:pointer-events-none disabled:opacity-40"
-                >
-                  Finish
-                </button>
-              </>
+                  key={s.color}
+                  onClick={() => commitStyle({ color: s.color })}
+                  aria-label={s.label}
+                  title={s.label}
+                  aria-pressed={style.color.toLowerCase() === s.color.toLowerCase()}
+                  className={cx(
+                    "h-6 w-6 rounded-full border transition",
+                    style.color.toLowerCase() === s.color.toLowerCase()
+                      ? "border-white ring-2 ring-white/30"
+                      : "border-white/25 hover:border-white/60"
+                  )}
+                  style={{ background: s.color }}
+                />
+              ))}
+              <label
+                className="relative h-6 w-6 cursor-pointer overflow-hidden rounded-full border border-white/25 transition hover:border-white/60"
+                title="Custom colour"
+              >
+                <span
+                  className="absolute inset-0"
+                  style={{ background: "conic-gradient(#c25b4e,#b59a6a,#5c8f5c,#4a7fb5,#7a5ea8,#c25b4e)" }}
+                />
+                <input
+                  type="color"
+                  value={style.color}
+                  onChange={(e) => commitStyle({ color: e.target.value })}
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                  aria-label="Custom colour"
+                />
+              </label>
+            </div>
+
+            {kind === "line" ? (
+              <label className="flex min-w-[140px] flex-1 items-center gap-2.5">
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/40">Width</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={40}
+                  step={1}
+                  value={style.width}
+                  onChange={(e) => previewStyle({ width: Number(e.target.value) })}
+                  onPointerUp={() => commitStyle({ width: styleRef.current.width })}
+                  onKeyUp={() => commitStyle({ width: styleRef.current.width })}
+                  className="h-1 flex-1 accent-[#d8b26a]"
+                  aria-label="Line width"
+                />
+                <span className="w-8 shrink-0 text-right font-mono text-[11px] text-white/70 tabular-nums">
+                  {style.width}
+                </span>
+              </label>
             ) : (
-              <>
-                {kind === "line" && (
+              <label className="flex min-w-[140px] flex-1 items-center gap-2.5">
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/40">Fill</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={style.fillOpacity}
+                  onChange={(e) => previewStyle({ fillOpacity: Number(e.target.value) })}
+                  onPointerUp={() => commitStyle({ fillOpacity: styleRef.current.fillOpacity })}
+                  onKeyUp={() => commitStyle({ fillOpacity: styleRef.current.fillOpacity })}
+                  className="h-1 flex-1 accent-[#d8b26a]"
+                  aria-label="Fill opacity"
+                />
+                <span className="w-9 shrink-0 text-right font-mono text-[11px] text-white/70 tabular-nums">
+                  {Math.round(style.fillOpacity * 100)}%
+                </span>
+              </label>
+            )}
+
+            <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
+              <span className="font-mono text-[11px] tracking-[0.1em] text-white/45" aria-live="polite">
+                {saving
+                  ? "SAVING"
+                  : dirty
+                    ? "UNSAVED"
+                    : exists
+                      ? "SAVED"
+                      : `${pts.length}/${minPts} POINTS`}
+              </span>
+
+              {phase === "draw" ? (
+                <>
                   <button
-                    onClick={() => {
-                      phaseRef.current = "draw";
-                      setPhase("draw");
-                      setSelected(null);
-                    }}
+                    onClick={cancelDraw}
                     className="inline-flex h-9 items-center rounded-[var(--radius-sm)] px-3 text-[13px] font-medium text-white/60 transition hover:bg-white/[0.08] hover:text-white"
                   >
-                    Keep drawing
+                    Cancel
                   </button>
-                )}
-                <button
-                  onClick={done}
-                  disabled={!ready}
-                  className="inline-flex h-9 items-center gap-2 rounded-[var(--radius-sm)] bg-[linear-gradient(180deg,#8b6d3d,#6a5230)] px-5 text-[13px] font-semibold text-white shadow-[0_1px_2px_rgba(122,96,52,0.45)] transition hover:brightness-110 disabled:pointer-events-none disabled:opacity-40"
+                  <button
+                    onClick={finish}
+                    disabled={!enough}
+                    className="inline-flex h-9 items-center gap-2 rounded-[var(--radius-sm)] bg-[linear-gradient(180deg,#8b6d3d,#6a5230)] px-5 text-[13px] font-semibold text-white shadow-[0_1px_2px_rgba(122,96,52,0.45)] transition hover:brightness-110 disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    Finish
+                  </button>
+                </>
+              ) : (
+                <>
+                  {kind === "line" && (
+                    <button
+                      onClick={() => {
+                        phaseRef.current = "draw";
+                        setPhase("draw");
+                        setSelected(null);
+                      }}
+                      className="inline-flex h-9 items-center rounded-[var(--radius-sm)] px-3 text-[13px] font-medium text-white/60 transition hover:bg-white/[0.08] hover:text-white"
+                    >
+                      Keep drawing
+                    </button>
+                  )}
+                  <button
+                    onClick={done}
+                    disabled={!ready}
+                    className="inline-flex h-9 items-center gap-2 rounded-[var(--radius-sm)] bg-[linear-gradient(180deg,#8b6d3d,#6a5230)] px-5 text-[13px] font-semibold text-white shadow-[0_1px_2px_rgba(122,96,52,0.45)] transition hover:brightness-110 disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    Done
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Look + text. Both write straight to the map as you touch them, so the
+              decision is made against the imagery rather than a swatch. */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2.5 border-t border-white/10 pt-2.5">
+            {kind === "line" && (
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/40">Look</span>
+                <div className="flex rounded-[var(--radius-sm)] border border-white/15 p-0.5">
+                  {LOOKS.map((o) => (
+                    <button
+                      key={o.value}
+                      onClick={() => commitStyle({ look: o.value })}
+                      aria-pressed={style.look === o.value}
+                      title={o.hint}
+                      className={cx(
+                        "h-6 rounded-[6px] px-2.5 text-[12px] font-medium transition",
+                        style.look === o.value
+                          ? "bg-white text-[#10141b]"
+                          : "text-white/55 hover:text-white"
+                      )}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <label className="flex min-w-[220px] flex-1 items-center gap-2.5">
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/40">Text</span>
+              <input
+                value={style.label}
+                maxLength={MAX_SHAPE_LABEL}
+                onChange={(e) => previewStyle({ label: e.target.value })}
+                onBlur={() => commitLabel(styleRef.current.label)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                }}
+                placeholder={
+                  kind === "polygon" ? "Name drawn on the area" : "Name drawn along the line"
+                }
+                title={
+                  kind === "polygon"
+                    ? "Drawn at the middle of the area."
+                    : "Drawn along the line and repeated, the way a river is labelled on a map."
+                }
+                className="h-8 min-w-0 flex-1 rounded-[var(--radius-sm)] border border-white/15 bg-white/[0.06] px-2.5 text-[13px] text-white placeholder:text-white/35 focus:border-white/30 focus:outline-none"
+              />
+            </label>
+
+            {/* Sizing and colouring nothing is noise — these arrive with the text. */}
+            {style.label.trim() !== "" && (
+              <div className="flex shrink-0 items-center gap-3">
+                <label className="flex items-center gap-2">
+                  <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/40">Size</span>
+                  <input
+                    type="range"
+                    min={8}
+                    max={48}
+                    step={1}
+                    value={style.labelSize}
+                    onChange={(e) => previewStyle({ labelSize: Number(e.target.value) })}
+                    onPointerUp={() => commitStyle({ labelSize: styleRef.current.labelSize })}
+                    onKeyUp={() => commitStyle({ labelSize: styleRef.current.labelSize })}
+                    className="h-1 w-[5.5rem] accent-[#d8b26a]"
+                    aria-label="Text size"
+                  />
+                  <span className="w-5 text-right font-mono text-[11px] text-white/70 tabular-nums">
+                    {style.labelSize}
+                  </span>
+                </label>
+
+                <label
+                  className="relative h-6 w-6 shrink-0 cursor-pointer overflow-hidden rounded-full border border-white/25 transition hover:border-white/60"
+                  title="Text colour — the outline behind it flips to stay readable"
                 >
-                  Done
-                </button>
-              </>
+                  <span className="absolute inset-0" style={{ background: style.labelColor }} />
+                  <input
+                    type="color"
+                    value={style.labelColor}
+                    onChange={(e) => commitStyle({ labelColor: e.target.value })}
+                    className="absolute inset-0 cursor-pointer opacity-0"
+                    aria-label="Text colour"
+                  />
+                </label>
+              </div>
             )}
           </div>
         </div>

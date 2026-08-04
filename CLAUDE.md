@@ -35,6 +35,17 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   immutably. Deleting a layer therefore must **not** delete its asset — past publications still
   reference it, and orphans are left on purpose. Swapping to S3 later touches only that table and
   that route.
+- **Drawn shapes** (no render to pin) are a vertex list plus a `style` jsonb, and **one shape row
+  expands into several Mapbox layers** — `shapeLayerSpecs()` in `mapLayers.ts` is the only place
+  that knows how many. A line's `look:"river"` is three derived passes (dark blurred bank / body /
+  off-centre sheen) instead of one flat stroke, and a non-empty `style.label` adds a symbol layer:
+  along the line for a line, at the centre for an area. **Text is always anchored with the lot
+  numbers**, whatever `above_lots` says — geometry belongs above or below the lots, but text under
+  a parcel fill or a site-plan render is just unreadable. So every helper works over the id *set*
+  (`shapeLayerIds`), and `ShapeEditor` previews through the same builder — a look the operator sees
+  and the visitor doesn't is the failure mode being designed out. `style` is a jsonb blob read
+  through `DEFAULT_SHAPE_STYLE`, so new style fields need **no** migration and old rows (and old
+  publications) render as plain solid lines with no label.
 - **Opening view:** the embed opens at the development's `default_view` (center/zoom/pitch/
   bearing). When `view_locked` is true (operator hand-framed it) the embed uses that view
   exactly; otherwise it auto-fits the lot cluster (`lotClusterBounds` in `MapView.tsx`).
@@ -98,7 +109,7 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
 | Parcel picker | `src/components/ParcelPicker.tsx` (add-a-development flow: pick parcels off satellite, hover card shows acres/value from LIR → `POST .../import`) |
 | GeoJSON upload | `src/components/GeoJsonUpload.tsx` + `src/lib/geojson.ts` (`normalizeGeoJSON()`: polygons only, WGS84 enforced — projected/CAD coordinates rejected with a re-export hint; parcel IDs + lot fields derived from feature properties, `LOT-00n` generated when absent). Second tab on `d/[slug]/parcels`; `POST .../import { mode: "geojson" }` → `importGeoJSON()` in repo.ts. Client and server run the **same normalizer**, so the pre-import summary matches what imports. Files parse fully in the browser (≤250 MB — county-wide exports OK); >2,000 lots routes through `GeoJsonTrimMap.tsx` (picker-style click/box selection over the file's own polygons, palette kept in sync with `ParcelPicker.tsx`) and imports are capped at 2,000 lots, uploaded as ~3 MB batches (prod Lambda body limit ~6 MB) with derived `parcel_id` stamped so batches resolve stable IDs |
 | CSV lot import | `src/components/CsvImport.tsx` (wizard modal on the Lots page: Upload → Match rows → Map columns → Review) + `src/lib/csv.ts` (parser, lot matching, header/type guessing — pure, so the review preview equals what applies). Enriches **existing** lots only (a CSV has no geometry): rows match on lot #/parcel ID/address (exact → loose → bare-number tiers, with per-row manual fix-ups); columns map to core fields, status, existing custom fields, or new fields (type auto-detected); unknown status values can create statuses from the review step. Blank cells never write or erase; "overwrite vs fill blanks" toggle. Applies via `POST .../import { mode: "csv" }` → `applyCsvImport()` in repo.ts (creates fields/statuses idempotently, whitelisted core-column updates, `properties \|\| jsonb` merge so unmapped keys survive) |
-| Map layers | `src/lib/layers.ts` (pure corner/rect math in **Web Mercator** — conformal, so a rect stays a rect and image aspect maps straight onto it), `src/lib/mapLayers.ts` (adds overlays to any map: `above_lots:false` → `beforeId=FILL`, `true` → `beforeId=LABEL` so lot numbers stay legible; overlays bind no handlers, so lot clicks pass through), `src/lib/image.ts` (browser downscale; JPEG when opaque, **WebP when the image has alpha** — a cut-out river must not flatten onto white), `src/components/LayersPanel.tsx` + `src/components/LayerEditor.tsx`, routes `src/app/api/dev/[slug]/layers`, `src/app/api/layer/{[id],reorder}`, `src/app/api/asset/[id]` |
+| Map layers | `src/lib/layers.ts` (pure corner/rect math in **Web Mercator** — conformal, so a rect stays a rect and image aspect maps straight onto it; drawn-shape helpers; `shade()`/`haloFor()`, so a river's banks and a label's outline are *derived* from the one colour the operator picked), `src/lib/mapLayers.ts` (adds overlays to any map: `above_lots:false` → `beforeId=FILL`, `true` → `beforeId=LABEL` so lot numbers stay legible; overlays bind no handlers, so lot clicks pass through), `src/lib/image.ts` (browser downscale; JPEG when opaque, **WebP when the image has alpha** — a cut-out river must not flatten onto white), `src/components/LayersPanel.tsx` + `src/components/LayerEditor.tsx` (image) + `src/components/ShapeEditor.tsx` (drawn), routes `src/app/api/dev/[slug]/layers`, `src/app/api/layer/{[id],reorder}`, `src/app/api/asset/[id]` |
 | Opening view | `src/components/OpeningViewEditor.tsx` (hand-frame the embed's opening camera → `PATCH/DELETE .../view`); a step in the add-flow (`d/[slug]/opening-view`) and a section in Map Design. `src/lib/camera.ts` (`holdCamera`/`cameraFor`) makes that view survive terrain and any iframe size — shared by the editor and the embed so both resolve it identically |
 | Types / shared | `src/lib/types.ts`, `src/lib/const.ts` (DEV_SLUG), `src/lib/client.ts`, `src/lib/http.ts` |
 | Deploy / infra | `amplify.yml` (build; runs `scripts/write-env.mjs`), `migrate.sql` + `scripts/migrate.mjs` (RDS schema), `HANDOFF.md` (live deploy status), `AWS_SETUP_RUNBOOK.md` |
@@ -117,9 +128,10 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
 - **Binary columns cross the driver boundary as hex text** (`decode($n,'hex')` in, `encode(bytes,'hex')`
   out) — PGlite returns `Uint8Array` and node-postgres returns `Buffer`, and they infer binary
   param types differently, so hex is the one path that behaves the same in dev and on RDS.
-- The layer editor runs the map **flat** — pitch 0, terrain off, rotation locked. Under pitch or
-  terrain, GL JS resolves screen→ground against the streaming DEM, so a dragged corner lands
-  somewhere other than where it was dropped. Handle drags also listen on `window`, not on the grip
+- Both layer editors (`LayerEditor`, `ShapeEditor`) run the map **flat** — pitch 0, terrain off,
+  rotation locked. Under pitch or terrain, GL JS resolves screen→ground against the streaming
+  DEM, so a dragged corner or a clicked vertex lands somewhere other than where it was
+  dropped. Handle drags also listen on `window`, not on the grip
   or via pointer capture: a grip is 14px, so the pointer leaves it immediately and any
   handle-scoped listener stops receiving moves. Grips render *above* the floating chrome (z-40)
   so a corner sitting behind the command bar is still grabbable.
@@ -132,7 +144,13 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   `--use-angle=swiftshader` for WebGL, wait for `.mapboxgl-canvas` + ~9s for tiles/terrain.
 - Layers: `POST /api/dev/{slug}/layers` with `{kind:"image", corners, image:{data:<base64>,mime,width,height}}`,
   then `GET /api/asset/{id}` must return byte-identical bytes; after `publish`, the published
-  config must carry the layer's `asset_id` and **no** base64.
+  config must carry the layer's `asset_id` and **no** base64. Shapes: same route with
+  `{kind:"shape", geometry, style}` — cheaper than drawing one by hand to check a paint change.
+- **Judging a shape's paint over satellite is guesswork** — the imagery is too busy to read a
+  soft edge, and a screenshot pixel-scan reads roads and lot fills, not the line. Flip the dev
+  to a plain basemap first (`PATCH /api/dev/{slug}/appearance {"basemap":"light","terrain":false}`),
+  compare against a control line of the same colour/width, then restore. That's how the river's
+  three passes were chosen: the rejected recipe (light halo, dark channel) vanished on light.
 - Prod smoke check: `curl https://main.d1fccqopge5j62.amplifyapp.com/api/dev` → fast `200`
   JSON array. A slow (~8s) empty-body 500 means the Lambda OOMed loading PGlite — i.e. the
   runtime didn't get the `PG*` env vars (see Production section).
