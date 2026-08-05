@@ -14,6 +14,18 @@ frontend:
         # can read them. Without this, db.ts sees no PGHOST at runtime and
         # falls back to PGlite → OOM.
         - node scripts/write-env.mjs
+        # Apply migrate.sql to RDS before the app that needs it ships. Prod only
+        # ever gets its schema from here — initPostgres() in db.ts opens a pool
+        # and nothing else, so SCHEMA_SQL (which does create the tables on the
+        # PGlite dev path) never runs against RDS. Leaving this manual is how
+        # `layers`/`layer_assets` reached production as live code with no tables
+        # behind it, twice. Idempotent: every statement is `if not exists`.
+        #
+        # Runs before `next build` so any page prerendered against the DB sees
+        # the new schema, and fails the build when it can't connect — including
+        # when the PG* console vars are missing, which would otherwise deploy an
+        # SSR Lambda that falls back to PGlite and OOMs on every request.
+        - npm run migrate
         - npm run build
   artifacts:
     # Amplify's Next.js SSR (WEB_COMPUTE) adapter reads .next; baseDirectory is

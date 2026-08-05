@@ -273,6 +273,9 @@ Ship in two passes so the alignment UX gets confirmed before the drawing work is
 7. ⬅ **You are here. Stop and show Ricky.** Pin a real render, confirm alignment feels right
    before continuing. Also still to do before this is live: **push** (nothing is deployed yet) and
    run `npm run migrate` against RDS so prod gets `layers` + `layer_assets`.
+   - **2026-08-05:** the push happened; the migration did not, so layers were dormant in prod
+     for a week (see [HANDOFF.md](HANDOFF.md) §4). The Amplify build now runs `npm run migrate`
+     itself, so this is no longer a step anyone has to remember.
 
 **Pass 2 — drawing** — not started
 8. Polygon / line / freehand capture on the same layer list and rendering path. The storage,

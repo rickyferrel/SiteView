@@ -71,8 +71,10 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   (never statically): a static import loads the WASM engine into the prod Lambda and OOMs it.
 - **Schema changes need a dev-server restart** — `SCHEMA_SQL` runs once at DB init, not on
   hot-reload — **and a mirror edit in `migrate.sql`**, which duplicates `schema.ts` by hand for
-  prod (`npm run migrate` applies it to RDS). Editing one without the other silently forks
-  dev vs prod schemas.
+  prod. Editing one without the other silently forks dev vs prod schemas: `SCHEMA_SQL` never
+  runs against RDS (`initPostgres()` only opens a pool), so a table that exists only in
+  `schema.ts` is a table prod does not have. The Amplify build applies `migrate.sql` for you
+  (see Production); `npm run migrate` is for applying it to RDS by hand, out of band.
 
 ## Production (AWS)
 
@@ -86,6 +88,12 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   env vars. `scripts/write-env.mjs` (called from [amplify.yml](amplify.yml) before `next build`)
   persists the `PG*`/server vars into `.env.production`, which the Next server loads at boot.
   Without it, runtime `PGHOST` is undefined and db.ts silently falls back to PGlite → OOM.
+- **The build migrates RDS** — [amplify.yml](amplify.yml) runs `npm run migrate` between
+  `write-env.mjs` and `next build`, so schema and code land in the same deploy. Before this,
+  migrating was a manual step people forgot: `layers`/`layer_assets` shipped as live code with
+  no tables behind them, and reads had to grow `isMissingTable()` guards in `repo.ts` to keep
+  the portal from 500ing meanwhile. A migration that can't connect now **fails the build**,
+  which is deliberate — that also catches missing `PG*` vars before they reach the Lambda.
 - **Env values are single-quoted with `$` escaped** in that file because Next's env loader
   (dotenv-expand) expands `$WORD` inside values *even when quoted* — the stock AWS
   `env | grep >> .env.production` pattern corrupts passwords. DB password is pasted verbatim
@@ -112,7 +120,7 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
 | Map layers | `src/lib/layers.ts` (pure corner/rect math in **Web Mercator** — conformal, so a rect stays a rect and image aspect maps straight onto it; drawn-shape helpers; `shade()`/`haloFor()`, so a river's banks and a label's outline are *derived* from the one colour the operator picked), `src/lib/mapLayers.ts` (adds overlays to any map: `above_lots:false` → `beforeId=FILL`, `true` → `beforeId=LABEL` so lot numbers stay legible; overlays bind no handlers, so lot clicks pass through), `src/lib/image.ts` (browser downscale; JPEG when opaque, **WebP when the image has alpha** — a cut-out river must not flatten onto white), `src/components/LayersPanel.tsx` + `src/components/LayerEditor.tsx` (image) + `src/components/ShapeEditor.tsx` (drawn), routes `src/app/api/dev/[slug]/layers`, `src/app/api/layer/{[id],reorder}`, `src/app/api/asset/[id]` |
 | Opening view | `src/components/OpeningViewEditor.tsx` (hand-frame the embed's opening camera → `PATCH/DELETE .../view`); a step in the add-flow (`d/[slug]/opening-view`) and a section in Map Design. `src/lib/camera.ts` (`holdCamera`/`cameraFor`) makes that view survive terrain and any iframe size — shared by the editor and the embed so both resolve it identically |
 | Types / shared | `src/lib/types.ts`, `src/lib/const.ts` (DEV_SLUG), `src/lib/client.ts`, `src/lib/http.ts` |
-| Deploy / infra | `amplify.yml` (build; runs `scripts/write-env.mjs`), `migrate.sql` + `scripts/migrate.mjs` (RDS schema), `HANDOFF.md` (live deploy status), `AWS_SETUP_RUNBOOK.md` |
+| Deploy / infra | `amplify.yml` (build; runs `scripts/write-env.mjs` then `npm run migrate`), `migrate.sql` + `scripts/migrate.mjs` (RDS schema), `HANDOFF.md` (live deploy status), `AWS_SETUP_RUNBOOK.md` |
 
 ## Conventions
 
