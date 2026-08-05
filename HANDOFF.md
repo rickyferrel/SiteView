@@ -65,8 +65,18 @@ Key implementation facts:
 ## 4. Status — where we are
 
 - ✅ Phase 0–2: region, RDS, TLS, security group — done.
-- ✅ Phase 4: **schema migrated to RDS** (all six tables live), verified by a real app-code
-  connection over TLS. **Skip CloudShell.**
+- ✅ Phase 4: **schema migrated to RDS** (the six tables of that era live), verified by a real
+  app-code connection over TLS. **Skip CloudShell.**
+  - ⚠️ **2026-08-05:** that was a *manual* `npm run migrate`, and it was never re-run when
+    `layers` + `layer_assets` were added (2026-07-27, commits `7cb74f5`/`4d0b81f`). The layers
+    code has been live in prod against a database with no layers tables since: the panel lists
+    nothing, the embed draws no overlays, and creating a layer 500s with
+    `relation "layers" does not exist`. Reads survive it only because `isMissingTable()` in
+    `repo.ts` degrades them to empty.
+  - **Fixed forward:** [amplify.yml](amplify.yml) now runs `npm run migrate` before
+    `next build`, so schema ships with the code it belongs to. The next deploy of `main`
+    creates both tables. To unblock prod sooner, run `npm run migrate` by hand against RDS
+    (idempotent — safe either way, and safe to run twice).
 - ✅ Phase 5: Amplify app created and deployed; atlas page renders.
 - 🔧 Phase 6: `/api/dev` returned 500 → `Runtime.OutOfMemory` (PGlite WASM loading in the Lambda).
   - Lazy-load fix `3ac5b35` deployed (verified live) but `/api/dev` **still 500s** with the same
