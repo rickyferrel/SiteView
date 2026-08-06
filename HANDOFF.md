@@ -67,6 +67,12 @@ Key implementation facts:
 - ✅ Phase 0–2: region, RDS, TLS, security group — done.
 - ✅ Phase 4: **schema migrated to RDS** (all six tables live), verified by a real app-code
   connection over TLS. **Skip CloudShell.**
+- ✅ **Layers migrated to RDS (2026-08-05)** — `layers` + `layer_assets` added; eight tables now
+  live. Verified against prod: a 4 KB payload covering every byte value round-tripped
+  byte-identical through `POST /api/dev/{slug}/layers` → `GET /api/asset/{id}`, the draft config
+  carried the `asset_id`, and deleting the layer left the asset in place (by design).
+  Note `npm run migrate` reads **process env only** — it does not load `.env.local`. With the
+  `PG*` vars in that file, run `node --env-file=.env.local scripts/migrate.mjs`.
 - ✅ Phase 5: Amplify app created and deployed; atlas page renders.
 - 🔧 Phase 6: `/api/dev` returned 500 → `Runtime.OutOfMemory` (PGlite WASM loading in the Lambda).
   - Lazy-load fix `3ac5b35` deployed (verified live) but `/api/dev` **still 500s** with the same
