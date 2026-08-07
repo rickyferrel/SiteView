@@ -5,7 +5,8 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import type { MapConfig, Status, Filter, FieldDef, DataState, Layer } from "@/lib/types";
 import { resolveMapStyle, hideLegacyLotLayers, applySatelliteTint, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
-import { syncLayers, setLayerVisible } from "@/lib/mapLayers";
+import { syncLayers, setLayerVisible, shapeHitLayerIds } from "@/lib/mapLayers";
+import { shapeInfo, type ShapeInfo } from "@/lib/layers";
 import { cameraFor, holdCamera, readCamera, type Camera } from "@/lib/camera";
 import { money, acres } from "@/lib/format";
 import { videoEmbed, isHttpUrl, type VideoEmbed } from "@/lib/video";
@@ -25,6 +26,13 @@ const LABEL = "parcels-label";
 const SEL_FILL = "selected-fill";
 const SEL_LINE = "selected-line";
 
+// What the panel is showing. A lot and a map feature are both "something the
+// visitor clicked", and only one can be open at a time, so they share one slot
+// rather than two states that could both be set.
+type Selection =
+  | { kind: "lot"; props: Props_ }
+  | { kind: "feature"; info: ShapeInfo; color: string };
+
 function fillColorExpr(statuses: Status[]) {
   const def = statuses.find((s) => s.is_default)?.color ?? "#8c3b3b";
   if (statuses.length === 0) return def;
@@ -32,6 +40,13 @@ function fillColorExpr(statuses: Status[]) {
   for (const s of statuses) expr.push(s.name, s.color);
   expr.push(def);
   return expr;
+}
+
+/** Drop the white halo off whichever lot was picked. Safe before the map loads. */
+function clearLotHighlight(map: mapboxgl.Map) {
+  if (!map.getLayer(SEL_FILL)) return;
+  map.setFilter(SEL_FILL, ["==", ["get", "parcel_id"], "___none___"]);
+  map.setFilter(SEL_LINE, ["==", ["get", "parcel_id"], "___none___"]);
 }
 
 function PanelVideo({ embed, title }: { embed: VideoEmbed; title: string }) {
@@ -85,7 +100,7 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
   const fcRef = useRef<GeoJSON.FeatureCollection | null>(null);
   const [config, setConfig] = useState<MapConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Props_ | null>(null);
+  const [selected, setSelected] = useState<Selection | null>(null);
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
   const [layersOpen, setLayersOpen] = useState(false);
   // Layers the visitor has switched off. Purely client-side — a visitor's view
@@ -261,25 +276,72 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
         });
 
         // Overlays go on after the parcel layers exist, so both stacking anchors
-        // (FILL below, LABEL above) are resolvable. They bind no handlers, so
-        // the lot click/hover handlers below still receive clicks through them.
+        // (FILL below, LABEL above) are resolvable.
         syncLayers(map, cfg.layers ?? [], { fill: FILL, label: LABEL });
 
-        map.on("mouseenter", FILL, () => {
-          if (map) map.getCanvas().style.cursor = "pointer";
+        // ---- Click targets ---------------------------------------------------
+        // The parcel fill and every shape the operator gave a detail card to are
+        // queried together, and the topmost one wins. Doing it in one handler
+        // rather than binding per layer is what makes the two answer to the same
+        // rule: a shape drawn *under* the lots never steals a lot's click, and
+        // one drawn *over* them does — which is exactly what the operator chose
+        // when they put it there.
+        const featureLayers = new Map<string, Layer>();
+        for (const l of cfg.layers ?? []) {
+          for (const id of shapeHitLayerIds(l)) {
+            if (map.getLayer(id)) featureLayers.set(id, l);
+          }
+        }
+        const clickable = [...featureLayers.keys(), FILL];
+        // Paint order, read once: the style's layer list is settled by now and
+        // nothing below reorders it. `getStyle()` serializes the whole style, so
+        // it must not be called per mousemove.
+        const depth = new Map<string, number>(
+          (map.getStyle()?.layers ?? []).map((l, i) => [l.id, i] as const)
+        );
+
+        const topHit = (m: mapboxgl.Map, pt: mapboxgl.Point) => {
+          const ids = clickable.filter((id) => m.getLayer(id));
+          if (!ids.length) return null;
+          let best: mapboxgl.GeoJSONFeature | null = null;
+          let bestDepth = -1;
+          for (const f of m.queryRenderedFeatures(pt, { layers: ids })) {
+            const d = depth.get(f.layer?.id ?? "") ?? -1;
+            if (d > bestDepth) {
+              best = f;
+              bestDepth = d;
+            }
+          }
+          return best;
+        };
+
+        map.on("mousemove", (e) => {
+          e.target.getCanvas().style.cursor = topHit(e.target, e.point) ? "pointer" : "";
         });
-        map.on("mouseleave", FILL, () => {
-          if (map) map.getCanvas().style.cursor = "";
-        });
-        map.on("click", FILL, (e) => {
-          const f = e.features?.[0];
-          if (!f || !map) return;
-          const props = f.properties ?? {};
-          setSelected(props);
+
+        map.on("click", (e) => {
+          const m = e.target;
+          const hit = topHit(m, e.point);
+          if (!hit) return; // bare ground — leave whatever's open, open
+
+          const layer = featureLayers.get(hit.layer?.id ?? "");
+          if (layer) {
+            const info = shapeInfo(layer.name, layer.style);
+            if (!info) return;
+            // No flyTo here, deliberately: a river or a golf course can span the
+            // whole development, so diving to the clicked point would throw the
+            // feature the visitor just asked about off screen.
+            setSelected({ kind: "feature", info, color: layer.style.color });
+            clearLotHighlight(m);
+            return;
+          }
+
+          const props = hit.properties ?? {};
+          setSelected({ kind: "lot", props });
           const pid = props.parcel_id;
-          map.setFilter(SEL_FILL, ["==", ["get", "parcel_id"], pid]);
-          map.setFilter(SEL_LINE, ["==", ["get", "parcel_id"], pid]);
-          map.flyTo({ center: e.lngLat, zoom: Math.max(map.getZoom(), 17), pitch: 70, duration: 1200, essential: true });
+          m.setFilter(SEL_FILL, ["==", ["get", "parcel_id"], pid]);
+          m.setFilter(SEL_LINE, ["==", ["get", "parcel_id"], pid]);
+          m.flyTo({ center: e.lngLat, zoom: Math.max(m.getZoom(), 17), pitch: 70, duration: 1200, essential: true });
         });
 
         setTimeout(() => map?.resize(), 300);
@@ -328,10 +390,7 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
   function closePanel() {
     setSelected(null);
     const map = mapRef.current;
-    if (map?.getLayer(SEL_FILL)) {
-      map.setFilter(SEL_FILL, ["==", ["get", "parcel_id"], "___none___"]);
-      map.setFilter(SEL_LINE, ["==", ["get", "parcel_id"], "___none___"]);
-    }
+    if (map) clearLotHighlight(map);
   }
 
   // Draft-only operator action: delete the lot row, drop its polygon from the
@@ -438,17 +497,70 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
 
       {state === "draft" && ribbon && <div className="sc-draft-ribbon">Draft preview · not yet published</div>}
 
-      {selected && config && (
+      {selected?.kind === "lot" && config && (
         <LotPanel
-          key={String(selected.parcel_id ?? "")}
-          props={selected}
+          key={String(selected.props.parcel_id ?? "")}
+          props={selected.props}
           fields={config.fields}
           statuses={config.statuses}
           onClose={closePanel}
-          onDelete={edit && state === "draft" && selected.rowId != null ? () => removeLot(String(selected.rowId)) : undefined}
+          onDelete={
+            edit && state === "draft" && selected.props.rowId != null
+              ? () => removeLot(String(selected.props.rowId))
+              : undefined
+          }
         />
       )}
+
+      {selected?.kind === "feature" && (
+        <FeaturePanel info={selected.info} color={selected.color} onClose={closePanel} />
+      )}
     </div>
+  );
+}
+
+/**
+ * The card behind a clicked map feature — a river, a park, the golf course.
+ * Deliberately the same panel chrome as a lot: to a visitor these are the same
+ * gesture producing the same kind of answer, and a second panel style would read
+ * as a second, unrelated map. The shape's own colour rides on the heading rule,
+ * which is the only thing tying the card back to the thing that was clicked.
+ */
+function FeaturePanel({
+  info,
+  color,
+  onClose,
+}: {
+  info: ShapeInfo;
+  color: string;
+  onClose: () => void;
+}) {
+  const embed = videoEmbed(info.video);
+  return (
+    <>
+      <div className="sc-panel-backdrop" onClick={onClose} />
+      <div className="sc-panel">
+        <button className="sc-close-btn" aria-label="Close" onClick={onClose}>
+          ×
+        </button>
+        <div style={{ clear: "both" }} />
+        <span className="sc-feature-rule" style={{ background: color }} />
+        <h2 className="sc-lot-title">{info.title}</h2>
+        {embed && <PanelVideo embed={embed} title={info.title} />}
+        {info.image && (
+          <div className="sc-image-wrap">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={info.image} alt="" loading="lazy" />
+          </div>
+        )}
+        {info.body && <p className="sc-feature-body">{info.body}</p>}
+        {info.link && (
+          <a className="sc-lot-link" href={info.link} target="_blank" rel="noopener noreferrer">
+            {info.linkLabel}
+          </a>
+        )}
+      </div>
+    </>
   );
 }
 

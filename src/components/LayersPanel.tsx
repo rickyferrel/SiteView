@@ -1,15 +1,28 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Layer, Corners } from "@/lib/types";
+import type { Layer, Corners, ShapeStyle } from "@/lib/types";
 import { jget, jsend } from "@/lib/client";
 import { assetUrl } from "@/lib/mapLayers";
-import { toMerc, rectForAspect, cornersFromRect, shapeKindOf, shade, type Pt, type ShapeKind } from "@/lib/layers";
+import {
+  toMerc,
+  rectForAspect,
+  cornersFromRect,
+  shapeKindOf,
+  shade,
+  shapeInfo,
+  MAX_INFO_TITLE,
+  MAX_INFO_BODY,
+  MAX_INFO_LINK_LABEL,
+  type Pt,
+  type ShapeKind,
+} from "@/lib/layers";
 import { prepareLayerImage, ImageTooLargeError, mb } from "@/lib/image";
+import { isHttpUrl } from "@/lib/video";
 import { LAYER_IMAGE_MIMES } from "@/lib/const";
 import LayerEditor from "@/components/LayerEditor";
 import ShapeEditor from "@/components/ShapeEditor";
-import { Section, Button, Eyebrow, SaveState, EmptyState, Skeleton, fieldClass, cx } from "@/components/ui";
+import { Section, Button, Eyebrow, SaveState, EmptyState, Skeleton, Field, fieldClass, cx } from "@/components/ui";
 
 /**
  * The Map Design surface for non-parcel map features: a developer's site-plan
@@ -37,6 +50,9 @@ export default function LayersPanel({ slug }: { slug: string }) {
   const [savedAt, setSavedAt] = useState<string | undefined>();
   const [editing, setEditing] = useState<string | null>(null);
   const [drawing, setDrawing] = useState<Drawing | null>(null);
+  // Which shape has its click-card editor expanded. One at a time — these are
+  // long forms and a stack of them buries the layer list they belong to.
+  const [detailing, setDetailing] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
@@ -87,6 +103,11 @@ export default function LayersPanel({ slug }: { slug: string }) {
     void run(async () => {
       await jsend(`/api/layer/${id}`, "PATCH", body);
     });
+  }
+
+  /** Style is merged, not replaced — the route does the same on its side. */
+  function patchStyle(l: Layer, style: Partial<ShapeStyle>) {
+    patch(l.id, { style: { ...l.style, ...style } });
   }
 
   // ---- Upload ---------------------------------------------------------------
@@ -337,13 +358,22 @@ export default function LayersPanel({ slug }: { slug: string }) {
                     )}
 
                     {l.kind === "shape" && l.geometry && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setDrawing({ layer: l, kind: shapeKindOf(l.geometry) })}
-                      >
-                        Edit shape
-                      </Button>
+                      <>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setDrawing({ layer: l, kind: shapeKindOf(l.geometry) })}
+                        >
+                          Edit shape
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setDetailing((cur) => (cur === l.id ? null : l.id))}
+                        >
+                          {shapeInfo(l.name, l.style) ? "Card ✓" : "Card"}
+                        </Button>
+                      </>
                     )}
 
                     <DeleteLayerButton
@@ -379,6 +409,14 @@ export default function LayersPanel({ slug }: { slug: string }) {
                       visitors can toggle
                     </label>
                   </div>
+
+                  {detailing === l.id && l.kind === "shape" && (
+                    <ShapeCardEditor
+                      key={l.id}
+                      layer={l}
+                      onCommit={(style) => patchStyle(l, style)}
+                    />
+                  )}
                 </div>
               );
             })}
@@ -392,7 +430,10 @@ export default function LayersPanel({ slug }: { slug: string }) {
             shape&rsquo;s editor, a line
             can be painted as a <strong className="font-medium text-graphite">river</strong> and
             either kind can carry <strong className="font-medium text-graphite">text</strong> drawn
-            onto the map — along the line, or across the middle of an area.
+            onto the map — along the line, or across the middle of an area.{" "}
+            <strong className="font-medium text-graphite">Card</strong> gives a drawn shape
+            something to say when a visitor clicks it, the way a lot opens its panel; a shape with
+            an empty card isn&rsquo;t clickable at all.
           </p>
         </>
       )}
@@ -496,6 +537,126 @@ function ShapeSwatch({ layer }: { layer: Layer }) {
         </svg>
       )}
     </span>
+  );
+}
+
+/* ---- The card a shape opens when a visitor clicks it --------------------- */
+
+const CARD_FIELDS: {
+  key: keyof Pick<
+    ShapeStyle,
+    "infoTitle" | "infoBody" | "infoImage" | "infoVideo" | "infoLink" | "infoLinkLabel"
+  >;
+  label: string;
+  placeholder?: string;
+  multiline?: boolean;
+  max?: number;
+  /** Goes into an href/src downstream — the server drops anything else. */
+  url?: boolean;
+  half?: boolean;
+}[] = [
+  { key: "infoTitle", label: "Heading", max: MAX_INFO_TITLE },
+  { key: "infoBody", label: "Description", multiline: true, max: MAX_INFO_BODY },
+  { key: "infoImage", label: "Image URL", placeholder: "https://…", url: true, half: true },
+  { key: "infoVideo", label: "Video URL", placeholder: "YouTube, Vimeo, Loom…", url: true, half: true },
+  { key: "infoLink", label: "Link URL", placeholder: "https://…", url: true, half: true },
+  {
+    key: "infoLinkLabel",
+    label: "Link button text",
+    placeholder: "Learn more",
+    max: MAX_INFO_LINK_LABEL,
+    half: true,
+  },
+];
+
+/**
+ * Fill any of these in and the shape becomes clickable on the map; leave them
+ * all empty and it stays scenery, with clicks passing through to the lot
+ * underneath. That's the whole switch — there isn't a separate "clickable"
+ * checkbox to end up contradicting an empty card, or a filled-in card nobody
+ * can reach.
+ *
+ * Commits on blur (like the layer-name field above it) rather than per keystroke:
+ * a description is a paragraph, and one PATCH per character is noise.
+ */
+function ShapeCardEditor({
+  layer,
+  onCommit,
+}: {
+  layer: Layer;
+  onCommit: (style: Partial<ShapeStyle>) => void;
+}) {
+  const [draft, setDraft] = useState(layer.style);
+  // Fields the server would have thrown away. It drops any URL that isn't plain
+  // http(s) — a card is rendered into `href`/`src` in the embed — and dropping
+  // one silently would leave the operator looking at a pasted value that was
+  // never stored, which is the one thing worse than refusing it.
+  const [rejected, setRejected] = useState<Record<string, boolean>>({});
+  const live = shapeInfo(layer.name, draft);
+
+  function commit(f: (typeof CARD_FIELDS)[number]) {
+    const v = (draft[f.key] ?? "").trim();
+    if (f.url && v && !isHttpUrl(v)) {
+      setRejected((r) => ({ ...r, [f.key]: true }));
+      return;
+    }
+    setRejected((r) => (r[f.key] ? { ...r, [f.key]: false } : r));
+    if (v === (layer.style[f.key] ?? "").trim()) return; // untouched — not a write
+    onCommit({ [f.key]: v });
+  }
+
+  return (
+    <div className="mt-2.5 border-t border-line-2 pt-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {CARD_FIELDS.map((f) => (
+          <div key={f.key} className={f.half ? "" : "sm:col-span-2"}>
+            <Field label={f.label}>
+              {f.multiline ? (
+                <textarea
+                  value={draft[f.key] ?? ""}
+                  maxLength={f.max}
+                  rows={3}
+                  onChange={(e) => setDraft((d) => ({ ...d, [f.key]: e.target.value }))}
+                  onBlur={() => commit(f)}
+                  className={fieldClass("!h-auto resize-y py-2 leading-relaxed")}
+                />
+              ) : (
+                <input
+                  value={draft[f.key] ?? ""}
+                  maxLength={f.max}
+                  placeholder={f.key === "infoTitle" ? layer.name : f.placeholder}
+                  onChange={(e) => setDraft((d) => ({ ...d, [f.key]: e.target.value }))}
+                  onBlur={() => commit(f)}
+                  aria-invalid={rejected[f.key] || undefined}
+                  className={fieldClass(rejected[f.key] ? "!border-danger/60" : "")}
+                />
+              )}
+            </Field>
+            {rejected[f.key] && (
+              <p className="mt-1 text-[12px] text-danger">
+                Not saved — the link has to start with http:// or https://
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <p className="mt-2.5 text-[12px] leading-relaxed text-faint">
+        {live ? (
+          <>
+            Visitors can click this {shapeKindOf(layer.geometry) === "polygon" ? "area" : "line"} to
+            open a card headed{" "}
+            <strong className="font-medium text-graphite">{live.title}</strong>. Check it in the
+            preview — it goes live on publish.
+          </>
+        ) : (
+          <>
+            Empty, so this shape isn&rsquo;t clickable — clicks pass through to the lot underneath
+            it. Fill in any field above to turn it into a click target.
+          </>
+        )}
+      </p>
+    </div>
   );
 }
 
