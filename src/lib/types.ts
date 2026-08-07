@@ -233,6 +233,22 @@ export type ShapeStyle = {
   label: string;
   labelSize: number; // px
   labelColor: string; // halo is derived from it, so text stays legible either way
+
+  // ---- The card a visitor opens by clicking the shape ----------------------
+  // A shape becomes clickable exactly when one of these is filled in — see
+  // `shapeInfo()` in lib/layers.ts. Scenery with nothing to say stays scenery
+  // and lets clicks fall through to the lot underneath it.
+  //
+  // These live on `style` rather than in columns of their own on purpose: the
+  // whole blob is jsonb read through DEFAULT_SHAPE_STYLE, so adding them needs
+  // no migration, they publish with the rest of the config, and shapes drawn
+  // before they existed read back as plain, unclickable scenery.
+  infoTitle: string; // "" → the layer's name is the heading
+  infoBody: string;
+  infoImage: string; // http(s) only, enforced server-side
+  infoVideo: string; // same pipeline as a lot's video_url
+  infoLink: string;
+  infoLinkLabel: string; // "" → "Learn more"
 };
 
 export const DEFAULT_SHAPE_STYLE: ShapeStyle = {
@@ -243,6 +259,12 @@ export const DEFAULT_SHAPE_STYLE: ShapeStyle = {
   label: "",
   labelSize: 14,
   labelColor: "#ffffff",
+  infoTitle: "",
+  infoBody: "",
+  infoImage: "",
+  infoVideo: "",
+  infoLink: "",
+  infoLinkLabel: "",
 };
 
 export type Layer = {

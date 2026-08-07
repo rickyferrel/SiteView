@@ -46,6 +46,19 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   and the visitor doesn't is the failure mode being designed out. `style` is a jsonb blob read
   through `DEFAULT_SHAPE_STYLE`, so new style fields need **no** migration and old rows (and old
   publications) render as plain solid lines with no label.
+- **A shape can be clickable, like a lot.** Fill in any of the `info*` fields on `style` (heading /
+  description / image / video / link, edited under **Card** on the Map Design layer row) and the
+  embed opens a panel for it — same chrome as the lot panel, since to a visitor it's the same
+  gesture. `shapeInfo()` in `layers.ts` is that rule: it returns the card or `null`, and `null`
+  means **not a click target at all** — scenery keeps letting clicks fall through to the lot
+  underneath, and no shape can be clickable but open an empty card. There is deliberately no
+  separate "clickable" switch to contradict the content. Two mechanics make it work: a line gets an
+  invisible `-hit` pass ~26px wide (`line-opacity` doesn't affect hit-testing, `visibility` does, so
+  a layer the visitor toggled off stops being clickable for free), and `MapView` runs **one**
+  click/hover handler that queries the parcel fill and every hit layer together and takes whichever
+  is topmost in the style's layer order. That's what makes `above_lots` mean what it says: a shape
+  drawn over the lots wins their clicks, one drawn under them doesn't. Feature clicks never `flyTo`
+  — a river can span the whole development, so diving at the click point throws it off screen.
 - **Opening view:** the embed opens at the development's `default_view` (center/zoom/pitch/
   bearing). When `view_locked` is true (operator hand-framed it) the embed uses that view
   exactly; otherwise it auto-fits the lot cluster (`lotClusterBounds` in `MapView.tsx`).
@@ -109,7 +122,7 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
 | Parcel picker | `src/components/ParcelPicker.tsx` (add-a-development flow: pick parcels off satellite, hover card shows acres/value from LIR → `POST .../import`) |
 | GeoJSON upload | `src/components/GeoJsonUpload.tsx` + `src/lib/geojson.ts` (`normalizeGeoJSON()`: polygons only, WGS84 enforced — projected/CAD coordinates rejected with a re-export hint; parcel IDs + lot fields derived from feature properties, `LOT-00n` generated when absent). Second tab on `d/[slug]/parcels`; `POST .../import { mode: "geojson" }` → `importGeoJSON()` in repo.ts. Client and server run the **same normalizer**, so the pre-import summary matches what imports. Files parse fully in the browser (≤250 MB — county-wide exports OK); >2,000 lots routes through `GeoJsonTrimMap.tsx` (picker-style click/box selection over the file's own polygons, palette kept in sync with `ParcelPicker.tsx`) and imports are capped at 2,000 lots, uploaded as ~3 MB batches (prod Lambda body limit ~6 MB) with derived `parcel_id` stamped so batches resolve stable IDs |
 | CSV lot import | `src/components/CsvImport.tsx` (wizard modal on the Lots page: Upload → Match rows → Map columns → Review) + `src/lib/csv.ts` (parser, lot matching, header/type guessing — pure, so the review preview equals what applies). Enriches **existing** lots only (a CSV has no geometry): rows match on lot #/parcel ID/address (exact → loose → bare-number tiers, with per-row manual fix-ups); columns map to core fields, status, existing custom fields, or new fields (type auto-detected); unknown status values can create statuses from the review step. Blank cells never write or erase; "overwrite vs fill blanks" toggle. Applies via `POST .../import { mode: "csv" }` → `applyCsvImport()` in repo.ts (creates fields/statuses idempotently, whitelisted core-column updates, `properties \|\| jsonb` merge so unmapped keys survive) |
-| Map layers | `src/lib/layers.ts` (pure corner/rect math in **Web Mercator** — conformal, so a rect stays a rect and image aspect maps straight onto it; drawn-shape helpers; `shade()`/`haloFor()`, so a river's banks and a label's outline are *derived* from the one colour the operator picked), `src/lib/mapLayers.ts` (adds overlays to any map: `above_lots:false` → `beforeId=FILL`, `true` → `beforeId=LABEL` so lot numbers stay legible; overlays bind no handlers, so lot clicks pass through), `src/lib/image.ts` (browser downscale; JPEG when opaque, **WebP when the image has alpha** — a cut-out river must not flatten onto white), `src/components/LayersPanel.tsx` + `src/components/LayerEditor.tsx` (image) + `src/components/ShapeEditor.tsx` (drawn), routes `src/app/api/dev/[slug]/layers`, `src/app/api/layer/{[id],reorder}`, `src/app/api/asset/[id]` |
+| Map layers | `src/lib/layers.ts` (pure corner/rect math in **Web Mercator** — conformal, so a rect stays a rect and image aspect maps straight onto it; drawn-shape helpers; `shade()`/`haloFor()`, so a river's banks and a label's outline are *derived* from the one colour the operator picked; `shapeInfo()` decides whether a shape is clickable at all), `src/lib/mapLayers.ts` (adds overlays to any map: `above_lots:false` → `beforeId=FILL`, `true` → `beforeId=LABEL` so lot numbers stay legible; binds no handlers itself — it only *builds* the `-hit` layers `MapView`'s one click handler queries, so a shape with no card never intercepts a lot click), `src/lib/image.ts` (browser downscale; JPEG when opaque, **WebP when the image has alpha** — a cut-out river must not flatten onto white), `src/components/LayersPanel.tsx` + `src/components/LayerEditor.tsx` (image) + `src/components/ShapeEditor.tsx` (drawn), routes `src/app/api/dev/[slug]/layers`, `src/app/api/layer/{[id],reorder}`, `src/app/api/asset/[id]` |
 | Opening view | `src/components/OpeningViewEditor.tsx` (hand-frame the embed's opening camera → `PATCH/DELETE .../view`); a step in the add-flow (`d/[slug]/opening-view`) and a section in Map Design. `src/lib/camera.ts` (`holdCamera`/`cameraFor`) makes that view survive terrain and any iframe size — shared by the editor and the embed so both resolve it identically |
 | Types / shared | `src/lib/types.ts`, `src/lib/const.ts` (DEV_SLUG), `src/lib/client.ts`, `src/lib/http.ts` |
 | Deploy / infra | `amplify.yml` (build; runs `scripts/write-env.mjs`), `migrate.sql` + `scripts/migrate.mjs` (RDS schema), `HANDOFF.md` (live deploy status), `AWS_SETUP_RUNBOOK.md` |
@@ -146,6 +159,14 @@ Mapbox tileset (existing  ┘   (status/price/...      (draft +      reads draft
   then `GET /api/asset/{id}` must return byte-identical bytes; after `publish`, the published
   config must carry the layer's `asset_id` and **no** base64. Shapes: same route with
   `{kind:"shape", geometry, style}` — cheaper than drawing one by hand to check a paint change.
+- **Testing map clicks needs a camera you can predict.** Screen↔ground is only exact arithmetic at
+  pitch 0 with terrain off (`PATCH .../appearance {"terrain":false}`) and a locked view whose
+  `size` matches the Playwright viewport — then a click point is plain Web Mercator: `x = (lng+180)
+  /360 · 512·2^zoom`, offset from the view centre. Two traps: a **lot** click flies the camera to
+  pitch 70, so reload between cases instead of clicking twice against stale math; and clicking a
+  polygon *edge* coordinate lands on neither side. Without a Mapbox token, point `mapbox_style` at
+  a local style JSON (background layer only) — GL JS then needs no token, and the missing `glyphs`
+  only costs you the symbol layers.
 - **Judging a shape's paint over satellite is guesswork** — the imagery is too busy to read a
   soft edge, and a screenshot pixel-scan reads roads and lot fills, not the line. Flip the dev
   to a plain basemap first (`PATCH /api/dev/{slug}/appearance {"basemap":"light","terrain":false}`),

@@ -15,6 +15,7 @@
 // operator drops them.
 
 import type { Corners, ShapeStyle, LineLook } from "./types";
+import { isHttpUrl } from "./video";
 
 export type Pt = [number, number]; // mercator [x, y] — x east, y *south*
 
@@ -255,6 +256,71 @@ export function validShapeGeometry(v: unknown): v is GeoJSON.Geometry {
 /** Longest label we'll draw on a shape — past this it's a paragraph, not a name. */
 export const MAX_SHAPE_LABEL = 80;
 
+/* ---- The card a shape opens on click ------------------------------------- */
+
+export const MAX_INFO_TITLE = 80;
+export const MAX_INFO_BODY = 800;
+export const MAX_INFO_LINK_LABEL = 40;
+const MAX_URL = 600;
+
+/** What the embed shows when a visitor clicks a shape. Resolved, never partial. */
+export type ShapeInfo = {
+  title: string;
+  body: string;
+  image: string;
+  video: string;
+  link: string;
+  linkLabel: string;
+};
+
+/**
+ * The detail card for a shape, or `null` when it has nothing to say.
+ *
+ * That `null` is the whole interaction model: a shape is clickable **exactly
+ * when the operator filled something in**. A river drawn as scenery keeps
+ * behaving like scenery — no cursor change, no panel, and clicks fall straight
+ * through to whatever lot is underneath it — while a river with a description
+ * becomes a target. No extra "clickable" switch to leave in the wrong state, and
+ * a shape can never be a click target that opens an empty card.
+ *
+ * The heading falls back to the layer's own name, so filling in only a body is
+ * still a complete card.
+ */
+export function shapeInfo(
+  name: string,
+  style: Partial<ShapeStyle> | null | undefined
+): ShapeInfo | null {
+  const s = style ?? {};
+  const t = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const title = t(s.infoTitle);
+  const body = t(s.infoBody);
+  const image = t(s.infoImage);
+  const video = t(s.infoVideo);
+  const link = t(s.infoLink);
+  if (!title && !body && !image && !video && !link) return null;
+  return {
+    title: title || name.trim() || "Feature",
+    body,
+    image,
+    video,
+    link,
+    linkLabel: t(s.infoLinkLabel) || "Learn more",
+  };
+}
+
+/**
+ * URL-valued card fields go into an `href`/`src` in the embed, so anything that
+ * isn't plainly http(s) is dropped rather than stored — `javascript:` in a link
+ * an operator pasted must never reach a visitor's browser. "" survives, because
+ * that's how a field gets cleared.
+ */
+function infoUrl(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const s = v.trim().slice(0, MAX_URL);
+  if (!s) return "";
+  return isHttpUrl(s) ? s : "";
+}
+
 const HEX = /^#[0-9a-f]{3,8}$/i;
 const LOOKS: LineLook[] = ["solid", "river"];
 
@@ -281,6 +347,16 @@ export function sanitizeShapeStyle(s: Partial<ShapeStyle> | undefined): Partial<
     out.labelSize = Math.max(8, Math.min(48, Number(s.labelSize)));
   }
   if (typeof s.labelColor === "string" && HEX.test(s.labelColor)) out.labelColor = s.labelColor;
+
+  if (typeof s.infoTitle === "string") out.infoTitle = s.infoTitle.trim().slice(0, MAX_INFO_TITLE);
+  if (typeof s.infoBody === "string") out.infoBody = s.infoBody.trim().slice(0, MAX_INFO_BODY);
+  if (typeof s.infoLinkLabel === "string") {
+    out.infoLinkLabel = s.infoLinkLabel.trim().slice(0, MAX_INFO_LINK_LABEL);
+  }
+  for (const k of ["infoImage", "infoVideo", "infoLink"] as const) {
+    const url = infoUrl(s[k]);
+    if (url !== null) out[k] = url;
+  }
   return out;
 }
 

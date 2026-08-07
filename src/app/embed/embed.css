@@ -317,6 +317,24 @@
   outline-offset: 2px;
 }
 
+/* MAP FEATURE CARD — a clicked river / park / golf course. Same panel chrome as
+   a lot; the shape's own colour is the only thing that differs, as a short rule
+   above the heading so the card is tied to the thing that was clicked. */
+.sc-feature-rule {
+  display: block;
+  width: 36px;
+  height: 3px;
+  border-radius: 999px;
+  margin-bottom: 12px;
+}
+.sc-feature-body {
+  font-size: 14px;
+  line-height: 1.6;
+  color: #39414f;
+  margin: 0 0 14px;
+  white-space: pre-wrap;
+}
+
 /* DRAFT EDIT — operator-only Remove-lot action in the lot panel.
    Rendered only when the portal preview iframe passes edit=1 on draft data. */
 .sc-remove-zone {

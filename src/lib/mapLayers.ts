@@ -3,7 +3,7 @@
 import type mapboxgl from "mapbox-gl";
 import type { Layer, Corners, ShapeStyle } from "./types";
 import { DEFAULT_SHAPE_STYLE } from "./types";
-import { shade, haloFor } from "./layers";
+import { shade, haloFor, shapeInfo } from "./layers";
 
 /**
  * Puts operator-configured overlay layers onto a Mapbox map. Shared by the embed
@@ -29,9 +29,11 @@ import { shade, haloFor } from "./layers";
  * Mapbox layers on the map (see `shapeLayerSpecs`), and every helper here works
  * in terms of that set rather than a single layer id.
  *
- * Overlays are intentionally non-interactive: no click or hover handlers are
- * bound here. The embed's handlers are bound to the parcel FILL by id, so lot
- * clicks keep working straight through an above-lots overlay.
+ * No handlers are bound here — this module only ever *builds* layers. A shape
+ * the operator gave a detail card to also gets an invisible hit layer (see
+ * `shapeHitLayerIds`); the embed queries those ids alongside the parcel fill and
+ * picks whichever is topmost, so a shape with nothing to say never intercepts a
+ * lot click and one with something to say does.
  */
 
 export type LayerAnchors = {
@@ -79,15 +81,43 @@ export type ShapeRender = {
   /** The layer row's opacity — folded into every pass so the slider is honest. */
   opacity: number;
   visible?: boolean;
+  /** Add the invisible click target. Off for editor previews — nothing to click. */
+  interactive?: boolean;
 };
 
 const BANK = "-bank";
 const SHEEN = "-sheen";
 const TEXT = "-label";
+const HIT = "-hit";
+
+/** Minimum clickable width of a line, in px — a comfortable fingertip. */
+const HIT_WIDTH = 26;
 
 /** Every layer id one shape can occupy. Order is irrelevant — this is for teardown. */
 export function shapeLayerIds(baseId: string): string[] {
-  return [baseId, baseId + BANK, baseId + SHEEN, baseId + TEXT];
+  return [baseId, baseId + BANK, baseId + SHEEN, baseId + TEXT, baseId + HIT];
+}
+
+/**
+ * Where a click on this layer lands, or `[]` when it isn't a click target.
+ *
+ * A **line** gets a dedicated wide invisible stroke: a 3px creek is a 3px hit
+ * area otherwise, which is a target nobody can hit on a phone. An **area** is
+ * already a fill spanning its whole footprint, so its own fill layer is the
+ * target — a duplicate would just cost a draw call. Where a shape carries text,
+ * the text is a target too: it's the part of a labelled feature a visitor
+ * actually aims at.
+ *
+ * Paint opacity doesn't affect hit-testing, but `visibility` does — so a layer
+ * the visitor switched off stops being clickable for free.
+ */
+export function shapeHitLayerIds(l: Layer): string[] {
+  if (l.kind !== "shape" || !l.geometry) return [];
+  if (!shapeInfo(l.name, l.style)) return [];
+  const base = lyrId(l.id);
+  const ids = [l.geometry.type === "Polygon" ? base : base + HIT];
+  if ((l.style?.label ?? "").trim()) ids.push(base + TEXT);
+  return ids;
 }
 
 /**
@@ -165,6 +195,19 @@ export function shapeLayerSpecs(o: ShapeRender): {
     } else {
       body.push(
         line(o.baseId, { "line-color": s.color, "line-width": w, "line-opacity": op })
+      );
+    }
+
+    // Fully transparent, and last so it sits above its own passes. Hit-testing
+    // reads line-width but not line-opacity, which is what makes a hair-thin
+    // trail as easy to tap as a wide river.
+    if (o.interactive) {
+      body.push(
+        line(o.baseId + HIT, {
+          "line-color": s.color,
+          "line-width": Math.max(w + 10, HIT_WIDTH),
+          "line-opacity": 0,
+        })
       );
     }
   }
@@ -254,6 +297,7 @@ function shapeRender(l: Layer): ShapeRender {
     style: l.style,
     opacity: l.opacity,
     visible: l.visible,
+    interactive: shapeHitLayerIds(l).length > 0,
   };
 }
 
