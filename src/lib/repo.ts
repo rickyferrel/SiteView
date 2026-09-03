@@ -10,7 +10,7 @@ import {
   SUMMIT_CREEK_BBOX,
   type Bbox,
 } from "./arcgis";
-import { normalizeGeoJSON } from "./geojson";
+import { normalizeGeoJSON, validateDrawnPolygon, polygonAcres } from "./geojson";
 import type {
   Development,
   DevelopmentInput,
@@ -311,6 +311,10 @@ function toFeature(r: ParcelJoin): GeoJSON.Feature {
       property_address: r.property_address,
       list_price: r.list_price,
       parcel_acres: r.parcel_acres,
+      // Drawn or reshaped by hand — the draw tool badges these, and county
+      // re-import leaves their outlines alone. Undefined on rows read from a
+      // publication snapshot taken before the column existed.
+      geometry_locked: r.geometry_locked ?? false,
       image_url: r.image_url,
       video_url: r.video_url,
       lot_page_url: r.lot_page_url,
@@ -384,10 +388,15 @@ async function upsertParcel(
   lot: LotFields | null,
   overwriteAttrs: boolean
 ) {
+  // Acreage is guarded alongside geometry, not with the other attributes: it
+  // *describes* the outline. Refreshing it on a hand-drawn row would leave the
+  // lot claiming the county's acreage for a shape the county never had.
   const setAttrs = overwriteAttrs && lot
     ? `, status_id = excluded.status_id, lot_number = excluded.lot_number,
          property_address = excluded.property_address, list_price = excluded.list_price,
-         parcel_acres = excluded.parcel_acres, image_url = excluded.image_url,
+         parcel_acres = case when parcels.geometry_locked then parcels.parcel_acres
+                             else excluded.parcel_acres end,
+         image_url = excluded.image_url,
          video_url = excluded.video_url, lot_page_url = excluded.lot_page_url`
     : "";
   await query(
@@ -396,7 +405,7 @@ async function upsertParcel(
         list_price, parcel_acres, image_url, video_url, lot_page_url, owner_name, source_attrs, updated_at)
      values ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb, now())
      on conflict (development_id, parcel_id) do update set
-       geometry = excluded.geometry,
+       geometry = case when parcels.geometry_locked then parcels.geometry else excluded.geometry end,
        source_attrs = excluded.source_attrs,
        owner_name = coalesce(excluded.owner_name, parcels.owner_name)
        ${setAttrs},
@@ -782,6 +791,159 @@ export async function updateParcel(
 
 export async function deleteParcel(rowId: string) {
   await query("delete from parcels where id = $1", [rowId]);
+}
+
+// ---- Hand-drawn parcels -----------------------------------------------------
+
+/**
+ * Next free lot number for a development, as a plain incrementing integer —
+ * max(existing numeric lot_number) + 1. Lot numbers that aren't numbers ("A-4",
+ * "Clubhouse") are ignored rather than parsed, so a development that numbers its
+ * lots by hand doesn't get a nonsense suggestion. The client shows this while
+ * drawing; the server re-derives it at insert time so two tabs can't collide.
+ */
+async function nextLotNumber(devId: string): Promise<number> {
+  const rows = await query<{ lot_number: string | null }>(
+    "select lot_number from parcels where development_id = $1",
+    [devId]
+  );
+  let max = 0;
+  for (const r of rows) {
+    const n = Number(String(r.lot_number ?? "").trim());
+    if (Number.isInteger(n) && n > max) max = n;
+  }
+  return max + 1;
+}
+
+/**
+ * A parcel_id no other lot in this development is using.
+ *
+ * Deliberately **not** `LOT-nnn`: that namespace belongs to `normalizeGeoJSON`,
+ * which mints `LOT-001…` for uploaded features that carry no ID of their own,
+ * counting from 1 every time. Draw eight lots into a fresh development and then
+ * upload an ID-less file and every one of those eight collides — the upsert
+ * lands on the drawn row, the lock throws the uploaded outline away, and eight
+ * lots quietly never arrive. Each source mints in its own namespace so that
+ * can't happen; `parcel_id` is internal plumbing either way, since the operator
+ * reads `lot_number`.
+ */
+async function freeParcelId(devId: string, seed: number): Promise<string> {
+  const rows = await query<{ parcel_id: string }>(
+    "select parcel_id from parcels where development_id = $1",
+    [devId]
+  );
+  const taken = new Set(rows.map((r) => r.parcel_id));
+  for (let n = seed; n < seed + 10_000; n++) {
+    const id = `DRAWN-${String(n).padStart(3, "0")}`;
+    if (!taken.has(id)) return id;
+  }
+  return `DRAWN-${randomUUID().slice(0, 8)}`;
+}
+
+export type DrawnParcelInput = {
+  geometry: unknown;
+  lot_number?: string | null;
+  parcel_id?: string | null;
+  status_id?: string | null;
+  property_address?: string | null;
+  list_price?: string | null;
+  /** County attributes, when a lot was adopted off the ArcGIS underlay. */
+  source_attrs?: Record<string, unknown> | null;
+  /**
+   * Pin this outline against county re-import. Defaults true — the tool's whole
+   * job is hand-made geometry. Adopting a county outline passes `false`: that
+   * shape *is* the county's, so a later re-import should keep refreshing it, and
+   * calling it "drawn" in the lot list would be a lie. Reshaping one by hand
+   * still locks it, via `setParcelGeometry`.
+   */
+  locked?: boolean;
+};
+
+/**
+ * Create one hand-drawn lot. Geometry is validated + canonicalized server-side
+ * (the draw tool runs the same `validateDrawnPolygon`, so the shape it accepts
+ * is the shape that stores), acreage is computed geodesically, and the row is
+ * marked `geometry_locked` so a later county re-import refreshes its attributes
+ * without flattening the drawing — unless `locked:false` says the outline came
+ * off the county underlay unchanged.
+ *
+ * Saved per-lot the moment a polygon closes rather than batched at the end: a
+ * 54-lot session is an hour of work, and a lost tab shouldn't cost all of it.
+ */
+export async function createDrawnParcel(
+  slug: string,
+  input: DrawnParcelInput
+): Promise<{ rowId: string; parcel_id: string; lot_number: string; parcel_acres: string }> {
+  const dev = await getDevelopment(slug);
+  if (!dev) throw new Error("development not found");
+
+  const geometry = validateDrawnPolygon(input.geometry);
+
+  const statuses = await getStatuses(dev.id);
+  const requested = input.status_id && statuses.some((s) => s.id === input.status_id) ? input.status_id : null;
+  const statusId = requested ?? statuses.find((s) => s.is_default)?.id ?? null;
+
+  const seed = await nextLotNumber(dev.id);
+  const lotNumber = String(input.lot_number ?? seed).trim() || String(seed);
+  const parcelId = (input.parcel_id ?? "").trim() || (await freeParcelId(dev.id, seed));
+  const acres = polygonAcres(geometry).toFixed(2);
+  const locked = input.locked !== false;
+
+  const rowId = randomUUID();
+  await query(
+    `insert into parcels
+       (id, development_id, parcel_id, geometry, status_id, lot_number, property_address,
+        list_price, parcel_acres, source_attrs, geometry_locked, updated_at)
+     values ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10::jsonb,$11, now())
+     on conflict (development_id, parcel_id) do update set
+       geometry = excluded.geometry,
+       geometry_locked = excluded.geometry_locked,
+       parcel_acres = excluded.parcel_acres,
+       updated_at = now()`,
+    [
+      rowId,
+      dev.id,
+      parcelId,
+      JSON.stringify(geometry),
+      statusId,
+      lotNumber,
+      input.property_address ?? null,
+      input.list_price ?? null,
+      acres,
+      JSON.stringify(input.source_attrs ?? {}),
+      locked,
+    ]
+  );
+
+  // First lots in an empty development: frame the opening camera on them, the
+  // same courtesy every other import path does (no-op once view_locked).
+  const c = geomCenter(geometry);
+  if (c) await frameClusterIfUnset(dev, c);
+
+  const row = await query<{ id: string }>(
+    "select id from parcels where development_id = $1 and parcel_id = $2",
+    [dev.id, parcelId]
+  );
+  return { rowId: row[0]?.id ?? rowId, parcel_id: parcelId, lot_number: lotNumber, parcel_acres: acres };
+}
+
+/**
+ * Reshape an existing lot. Recomputes acreage and locks the geometry, so
+ * reshaping a county-sourced lot protects the edit exactly like a drawn one.
+ */
+export async function setParcelGeometry(
+  rowId: string,
+  geometry: unknown
+): Promise<{ parcel_acres: string }> {
+  const g = validateDrawnPolygon(geometry);
+  const acres = polygonAcres(g).toFixed(2);
+  await query(
+    `update parcels
+        set geometry = $1::jsonb, parcel_acres = $2, geometry_locked = true, updated_at = now()
+      where id = $3`,
+    [JSON.stringify(g), acres, rowId]
+  );
+  return { parcel_acres: acres };
 }
 
 export async function createStatus(devId: string, s: Partial<Status>) {

@@ -198,6 +198,8 @@ export type Parcel = {
   owner_name: string | null;
   properties: Record<string, unknown>;
   source_attrs: Record<string, unknown>;
+  /** Drawn/reshaped by hand — county re-import must not overwrite the outline. */
+  geometry_locked: boolean;
   updated_at: string;
 };
 

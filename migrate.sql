@@ -84,6 +84,10 @@ create table if not exists parcels (
 );
 create index if not exists parcels_dev on parcels(development_id);
 
+-- Hand-drawn/hand-reshaped geometry: protected from county re-import. See src/lib/schema.ts.
+alter table parcels
+  add column if not exists geometry_locked boolean not null default false;
+
 create table if not exists publications (
   id             text primary key,
   development_id text not null references developments(id) on delete cascade,

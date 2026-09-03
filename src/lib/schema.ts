@@ -91,6 +91,13 @@ create table if not exists parcels (
 );
 create index if not exists parcels_dev on parcels(development_id);
 
+-- Set when an operator draws or reshapes a lot by hand. County re-imports
+-- upsert on (development_id, parcel_id) and would otherwise overwrite that
+-- geometry with the assessor's, silently discarding the drawing; a locked row
+-- keeps its shape and still refreshes its attributes. Only geometry is pinned.
+alter table parcels
+  add column if not exists geometry_locked boolean not null default false;
+
 create table if not exists publications (
   id             text primary key,
   development_id text not null references developments(id) on delete cascade,

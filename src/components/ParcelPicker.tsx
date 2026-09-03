@@ -219,7 +219,11 @@ export default function ParcelPicker({ slug, token, initialView }: Props) {
       });
 
       loadViewport();
-      setTimeout(() => map.resize(), 200);
+      // Guarded: switching source tabs inside this 200ms unmounts us and
+      // `map.remove()` tears down the canvas this resize would write to.
+      setTimeout(() => {
+        if (mapRef.current) map.resize();
+      }, 200);
     });
 
     map.on("idle", loadViewport);

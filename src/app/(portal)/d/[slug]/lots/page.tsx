@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { devPath } from "@/lib/const";
 import { jget, jsend } from "@/lib/client";
-import { money } from "@/lib/format";
+import { acres, money } from "@/lib/format";
 import { videoEmbed } from "@/lib/video";
 import VideoPreview from "@/components/VideoPreview";
 import CsvImport from "@/components/CsvImport";
@@ -233,8 +233,11 @@ export default function LotsPage() {
                         <td className="max-w-xs truncate px-4 py-2.5 text-graphite">
                           {String(r.property_address ?? "") || <span className="text-faint">—</span>}
                         </td>
+                        {/* Formatted, not raw: a drawn lot stores measured 2dp
+                            acreage and an imported one stores the assessor's six,
+                            and one tabular-nums column can't read both. */}
                         <td className="px-4 py-2.5 text-right font-mono text-[13px] text-ink-1 tabular-nums">
-                          {String(r.parcel_acres ?? "") || <span className="text-faint">—</span>}
+                          {acres(String(r.parcel_acres ?? "")) || <span className="text-faint">—</span>}
                         </td>
                         <td className="px-4 py-2.5 text-right font-mono text-[13px] tabular-nums">
                           {price ? (
