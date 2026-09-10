@@ -19,7 +19,7 @@ type Source = "map" | "file" | "draw";
 const BLURB: Record<Source, string> = {
   map: "Search an address to fly there, then click parcels or drag a box to select the lots that belong to this development. Importing pulls clean county geometry in with your default status.",
   file: "Upload your lot polygons as GeoJSON or an Esri Shapefile (.zip or .shp + .dbf + .prj) — from GIS software, a survey, or a CAD export. Big county-wide files are fine: you'll trim the selection down to your community on a map before importing.",
-  draw: "Draw lots straight onto the imagery — for the plat that never became a file. Search your site, then trace corners, drag rectangles, split a block, or copy a lot along the street.",
+  draw: "Draw lots straight onto the imagery — for the plat that never became a file. Search your site, pin the developer's render to trace off if you have one, then trace corners, drag rectangles, split a block, or copy a lot along the street.",
 };
 
 export default function AddParcelsPage() {

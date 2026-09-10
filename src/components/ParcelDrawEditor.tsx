@@ -3,12 +3,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
-import type { MapConfig, Layer, Status } from "@/lib/types";
-import { syncLayers, setLayerOpacity } from "@/lib/mapLayers";
+import type { MapConfig, Layer, Status, Corners } from "@/lib/types";
+import { syncLayers, setLayerOpacity, setLayerCoordinates } from "@/lib/mapLayers";
 import {
   toMerc,
   fromMerc,
   cornersFromRect,
+  cornersBbox,
+  rectFromCorners,
+  rectForAspect,
   rotateRectTo,
   rotateHandle,
   scaleRectFromCorner,
@@ -52,7 +55,11 @@ import { jsend } from "@/lib/client";
 // came here to trace a plat has to get to the site first, and a development
 // with no lots yet has no geometry to frame the camera on.
 import { newSessionToken, suggestAddress, retrieveSuggestion, type Suggestion } from "@/lib/geocode";
-import { PICKER_MIN_ZOOM } from "@/lib/const";
+// Pinning a render is the same upload the Map Design panel does — same
+// downscale ladder, same alpha-aware encoder, same size ceiling — so a plan
+// added here is indistinguishable from one added there.
+import { prepareLayerImage, ImageTooLargeError, mb } from "@/lib/image";
+import { PICKER_MIN_ZOOM, LAYER_IMAGE_MIMES } from "@/lib/const";
 import { Chip, Dot, Eyebrow, cx } from "@/components/ui";
 
 /**
@@ -319,6 +326,28 @@ function bboxOf(lots: LotRow[]): [number, number, number, number] | null {
 }
 
 /** Radians clockwise-from-east → the 0–179° a street angle is quoted in. */
+/** Pointer → ground, in mercator. Exact, because the camera here is flat. */
+function mercAt(map: mapboxgl.Map, p: ScreenPt): Pt {
+  const ll = map.unproject(p);
+  return toMerc([ll.lng, ll.lat]);
+}
+
+/**
+ * Where a freshly pinned render lands: centred on what the operator is looking
+ * at, 80% of the visible box, at the image's own aspect so nothing is stretched
+ * and every corner grip is reachable. The Map Design panel frames a new render
+ * on the lot cluster instead — right there, but wrong here, where the usual case
+ * is a development with no lots yet and a camera the operator just aimed.
+ */
+function viewportCorners(map: mapboxgl.Map, aspect: number): Corners {
+  const c = map.getCenter();
+  const centre = toMerc([c.lng, c.lat]);
+  const b = map.getBounds();
+  const halfW = b ? Math.abs(toMerc([b.getEast(), c.lat])[0] - centre[0]) * 0.8 : 0.005 / 360;
+  const halfH = b ? Math.abs(toMerc([c.lng, b.getNorth()])[1] - centre[1]) * 0.8 : 0.005 / 360;
+  return cornersFromRect(rectForAspect(centre, halfW, halfH, aspect));
+}
+
 function degrees(rot: number): number {
   return Math.round((((rot * 180) / Math.PI) % 180 + 180) % 180);
 }
@@ -394,6 +423,32 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
   const [planOn, setPlanOn] = useState(false);
   const [planOpacity, setPlanOpacity] = useState(0.75);
   const planOpacityRef = useRef(planOpacity);
+
+  // ---- Site plan ----------------------------------------------------------
+  // A render can be pinned from right here rather than back on Map Design:
+  // tracing a plan and having the plan on the map is one task, and sending the
+  // operator to another page to do half of it loses the camera they just framed.
+  // The row it creates is an ordinary image layer — the same one Map Design
+  // lists, and the same one that publishes.
+  //
+  // `pinning` holds the layer being positioned, and while it is set the drawing
+  // tools stand down: every map click belongs to the render.
+  const [pinning, setPinning] = useState<string | null>(null);
+  const pinningRef = useRef<string | null>(null);
+  const [pinMode, setPinMode] = useState<"transform" | "fine">("transform");
+  const [pinLockAspect, setPinLockAspect] = useState(true);
+  const [pinConfirmRemove, setPinConfirmRemove] = useState(false);
+  // The live corner set, held in a ref: pointer handlers bound on `window` read
+  // it without re-binding, and a drag frame nudges the image's coordinates on
+  // the map instead of re-running `syncLayers`, which tears the stack down.
+  const pinCornersRef = useRef<Corners | null>(null);
+  const [pinScreen, setPinScreen] = useState<{ quad: ScreenPt[]; rotate: ScreenPt | null }>({
+    quad: [],
+    rotate: null,
+  });
+  const paintPinRef = useRef<(() => void) | null>(null);
+  const [planBusy, setPlanBusy] = useState<string | null>(null);
+  const planFileRef = useRef<HTMLInputElement>(null);
   const [countyOn, setCountyOn] = useState(false);
   const countyOnRef = useRef(countyOn);
   const [countyBusy, setCountyBusy] = useState(false);
@@ -504,6 +559,7 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
   useEffect(() => { lockAngleRef.current = lockAngle; }, [lockAngle]);
   useEffect(() => { blockRef.current = block; }, [block]);
   useEffect(() => { snapHitRef.current = snapHit; }, [snapHit]);
+  useEffect(() => { pinningRef.current = pinning; }, [pinning]);
 
   /* ---- Snap candidates ---------------------------------------------------- */
   // Rebuilt whenever the geometry on the map changes. Bboxes are precomputed so
@@ -1208,7 +1264,18 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
     // below nudges the paint property instead.
     syncLayers(
       map,
-      planOn ? imageLayers.map((l) => ({ ...l, visible: true, opacity: planOpacityRef.current })) : [],
+      planOn
+        ? imageLayers.map((l) => ({
+            ...l,
+            visible: true,
+            opacity: planOpacityRef.current,
+            // A rebuild part-way through positioning must not snap the render
+            // back to the corners the row was loaded with — the live set lives
+            // in the ref until the operator is done with it.
+            corners:
+              l.id === pinningRef.current && pinCornersRef.current ? pinCornersRef.current : l.corners,
+          }))
+        : [],
       { fill: FILL, label: LABEL }
     );
   }, [ready, planOn, imageLayers]);
@@ -1219,6 +1286,44 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
     if (!map || !ready || !planOn) return;
     for (const l of imageLayers) setLayerOpacity(map, l, planOpacity);
   }, [ready, planOn, planOpacity, imageLayers]);
+
+  // The render's outline and grips are screen-space furniture over a ground-space
+  // quad, so they are re-projected on every map render — and on demand, because
+  // a corner drag changes the quad without the camera moving.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !pinning) {
+      paintPinRef.current = null;
+      setPinScreen({ quad: [], rotate: null });
+      return;
+    }
+    const paint = () => {
+      const c = pinCornersRef.current;
+      if (!c) return;
+      const quad = c.map((ll) => {
+        const pt = map.project(ll as [number, number]);
+        return [pt.x, pt.y] as ScreenPt;
+      });
+      // Rotation grip: 34px clear of the top edge in screen space, so it keeps
+      // its distance at every zoom.
+      const [tl, tr, , bl] = quad;
+      let rotate: ScreenPt | null = null;
+      if (tl && tr && bl) {
+        const ux = tl[0] - bl[0];
+        const uy = tl[1] - bl[1];
+        const len = Math.hypot(ux, uy) || 1;
+        rotate = [(tl[0] + tr[0]) / 2 + (ux / len) * 34, (tl[1] + tr[1]) / 2 + (uy / len) * 34];
+      }
+      setPinScreen({ quad, rotate });
+    };
+    paintPinRef.current = paint;
+    paint();
+    map.on("render", paint);
+    return () => {
+      map.off("render", paint);
+      paintPinRef.current = null;
+    };
+  }, [ready, pinning]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1335,8 +1440,10 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
     if (!map || !ready) return;
 
     const canvas = map.getCanvas();
-    const drawingCursor = !reshape && (mode === "polygon" || mode === "split" || mode === "rect");
-    canvas.style.cursor = reshape ? "" : drawingCursor ? "crosshair" : mode === "copy" ? "pointer" : "";
+    const drawingCursor =
+      !reshape && !pinning && (mode === "polygon" || mode === "split" || mode === "rect");
+    canvas.style.cursor =
+      reshape || pinning ? "" : drawingCursor ? "crosshair" : mode === "copy" ? "pointer" : "";
 
     const lotAt = (p: mapboxgl.Point): string | null =>
       (map.queryRenderedFeatures(p, { layers: [FILL] })[0]?.properties?.rowId as string) ?? null;
@@ -1347,6 +1454,7 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
 
     const onClick = (e: mapboxgl.MapMouseEvent) => {
       if (reshapeRef.current) return; // grips own the interaction while reshaping
+      if (pinningRef.current) return; // so does the render being positioned
       const here: ScreenPt = [e.point.x, e.point.y];
       const m = modeRef.current;
 
@@ -1386,7 +1494,7 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
     };
 
     const onMove = (e: mapboxgl.MapMouseEvent) => {
-      if (reshapeRef.current) return;
+      if (reshapeRef.current || pinningRef.current) return;
       const here: ScreenPt = [e.point.x, e.point.y];
       const m = modeRef.current;
       if (m === "polygon" || m === "split" || m === "rect") {
@@ -1406,7 +1514,8 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
     };
 
     const onDbl = () => {
-      if (!reshapeRef.current && !blockRef.current && modeRef.current !== "rect") finishPolygon();
+      if (reshapeRef.current || pinningRef.current) return;
+      if (!blockRef.current && modeRef.current !== "rect") finishPolygon();
     };
 
     map.on("click", onClick);
@@ -1419,7 +1528,7 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
       map.off("mouseout", onLeave);
       map.off("dblclick", onDbl);
     };
-  }, [ready, mode, reshape, adoptCounty, chooseCopySource, finishPolygon, groundAt, setPtsBoth]);
+  }, [ready, mode, reshape, pinning, adoptCounty, chooseCopySource, finishPolygon, groundAt, setPtsBoth]);
 
   /* ---- Rectangle drag on the canvas --------------------------------------- */
   // The one gesture that can't share the map's own drag: mapbox would pan.
@@ -1429,7 +1538,7 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    const armed = mode === "rect" && !reshape;
+    const armed = mode === "rect" && !reshape && !pinning;
     if (armed && !spaceRef.current) map.dragPan.disable();
     else map.dragPan.enable();
     if (!armed) return;
@@ -1464,7 +1573,7 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
 
     el.addEventListener("mousedown", onDown);
     return () => el.removeEventListener("mousedown", onDown);
-  }, [ready, mode, reshape, groundAt, pointerLngLat, setRectBoth]);
+  }, [ready, mode, reshape, pinning, groundAt, pointerLngLat, setRectBoth]);
 
   /* ---- Grips -------------------------------------------------------------- */
   /* Drags run on **window** listeners, not the grip: a grip is 13px, so the
@@ -1620,10 +1729,212 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
     });
   }
 
+  /* ---- Site plan ---------------------------------------------------------- */
+
+  const pinLayer = pinning ? (imageLayers.find((l) => l.id === pinning) ?? null) : null;
+
+  /** Frame a render. `onlyIfOffscreen` leaves a camera the operator aimed alone. */
+  const frameCorners = useCallback((c: Corners, onlyIfOffscreen = false) => {
+    const map = mapRef.current;
+    if (!map) return;
+    const [west, south, east, north] = cornersBbox(c);
+    if (onlyIfOffscreen) {
+      const b = map.getBounds();
+      if (b && west <= b.getEast() && east >= b.getWest() && south <= b.getNorth() && north >= b.getSouth()) {
+        return;
+      }
+    }
+    map.fitBounds(
+      [
+        [west, south],
+        [east, north],
+      ],
+      { padding: FRAME_PADDING, duration: 600 }
+    );
+  }, []);
+
+  /**
+   * A drag frame moves the image's own coordinates and repaints the quad —
+   * nothing goes through React state, and nothing rebuilds the overlay stack.
+   */
+  function setPinCorners(layer: Layer, c: Corners) {
+    pinCornersRef.current = c;
+    const map = mapRef.current;
+    if (map) setLayerCoordinates(map, layer, c);
+    paintPinRef.current?.();
+  }
+
+  /** Corners save on pointer-release, the way every other edit here autosaves. */
+  function savePinCorners() {
+    const id = pinningRef.current;
+    const c = pinCornersRef.current;
+    if (!id || !c) return;
+    void run(async () => {
+      await jsend<Layer>(`/api/layer/${id}`, "PATCH", { corners: c });
+    });
+  }
+
+  function dragPinBody(e: React.PointerEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    const map = mapRef.current;
+    const layer = pinLayer;
+    const start = pinCornersRef.current;
+    const from = pointerLngLat(e);
+    if (!map || !layer || !start || !from) return;
+    const origin = mercAt(map, from);
+    beginDrag((p) => {
+      const m = mercAt(map, p);
+      const dx = m[0] - origin[0];
+      const dy = m[1] - origin[1];
+      // Translation works on the raw quad, not a re-derived rectangle, so
+      // nudging a fine-tuned render never squares it back up.
+      setPinCorners(
+        layer,
+        start.map((c) => {
+          const q = toMerc(c);
+          return fromMerc([q[0] + dx, q[1] + dy]);
+        }) as Corners
+      );
+    }, savePinCorners);
+  }
+
+  function dragPinCorner(e: React.PointerEvent, index: number) {
+    e.preventDefault();
+    e.stopPropagation();
+    const map = mapRef.current;
+    const layer = pinLayer;
+    const start = pinCornersRef.current;
+    if (!map || !layer || !start) return;
+    // Snapshot the mode and the modifier now: neither can meaningfully change
+    // mid-drag, and reading them here keeps the window listener free of stale
+    // closures.
+    const startRect = pinMode === "fine" ? null : rectFromCorners(start);
+    const lock = pinLockAspect;
+    beginDrag((p) => {
+      const m = mercAt(map, p);
+      if (startRect) {
+        setPinCorners(layer, cornersFromRect(scaleRectFromCorner(startRect, index, m, lock)));
+        return;
+      }
+      const next = [...(pinCornersRef.current ?? start)] as Corners;
+      next[index] = fromMerc(m);
+      setPinCorners(layer, next);
+    }, savePinCorners);
+  }
+
+  function dragPinRotate(e: React.PointerEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    const map = mapRef.current;
+    const layer = pinLayer;
+    const start = pinCornersRef.current;
+    if (!map || !layer || !start) return;
+    const startRect = rectFromCorners(start);
+    beginDrag((p) => {
+      setPinCorners(layer, cornersFromRect(rotateRectTo(startRect, mercAt(map, p))));
+    }, savePinCorners);
+  }
+
+  const startPinning = useCallback(
+    (id: string) => {
+      const layer = imageLayers.find((l) => l.id === id);
+      if (!layer?.corners) return;
+      // Positioning owns the map while it lasts, so anything half-drawn goes
+      // first — a stray outline left under the render is impossible to finish.
+      clearDraft();
+      if (reshapeRef.current) setReshapeBoth(null);
+      setSelectedVertex(null);
+      setNote(null);
+      setPinConfirmRemove(false);
+      pinCornersRef.current = layer.corners;
+      setPlanOn(true);
+      setPinMode("transform");
+      pinningRef.current = id;
+      setPinning(id);
+      frameCorners(layer.corners, true);
+    },
+    [clearDraft, frameCorners, imageLayers, setReshapeBoth]
+  );
+
+  const stopPinning = useCallback(() => {
+    const id = pinningRef.current;
+    const c = pinCornersRef.current;
+    pinningRef.current = null;
+    pinCornersRef.current = null;
+    setPinning(null);
+    setPinConfirmRemove(false);
+    // Fold the positioned corners back into the row now that a rebuild costs
+    // nothing: from here on, `syncLayers` is the only thing drawing it.
+    if (id && c) setImageLayers((cur) => cur.map((l) => (l.id === id ? { ...l, corners: c } : l)));
+  }, []);
+
+  async function addPlan(file: File) {
+    const map = mapRef.current;
+    if (!map) return;
+    setNote(null);
+    setPlanBusy("Reading…");
+    try {
+      const prepared = await prepareLayerImage(file);
+      setPlanBusy("Uploading…");
+      const corners = viewportCorners(map, prepared.width / prepared.height);
+      // Created on the server before it is positioned, for the same reason a
+      // drawn lot is saved the moment it closes: an alignment session is long,
+      // and a lost tab shouldn't cost the upload as well.
+      const layer = await jsend<Layer>(`/api/dev/${slug}/layers`, "POST", {
+        kind: "image",
+        name: file.name.replace(/\.[^.]+$/, "").slice(0, 120) || "Site plan",
+        corners,
+        image: {
+          data: prepared.data,
+          mime: prepared.mime,
+          width: prepared.width,
+          height: prepared.height,
+        },
+      });
+      setImageLayers((cur) => [...cur, layer]);
+      pinCornersRef.current = corners;
+      setPlanOn(true);
+      setPinMode("transform");
+      setPinConfirmRemove(false);
+      pinningRef.current = layer.id;
+      setPinning(layer.id);
+      setNote({
+        tone: "info",
+        text: prepared.reduced
+          ? `Resized for upload: ${mb(prepared.originalBytes)} → ${mb(prepared.bytes)} MB (${prepared.width}×${prepared.height}). Drag it onto the site.`
+          : "Drag the render onto the site, then trace it.",
+      });
+    } catch (e) {
+      setNote({
+        tone: "error",
+        text: e instanceof ImageTooLargeError ? e.message : readable(e),
+      });
+    } finally {
+      setPlanBusy(null);
+    }
+  }
+
+  function removePlan() {
+    const id = pinningRef.current;
+    if (!id) return;
+    pinningRef.current = null;
+    pinCornersRef.current = null;
+    setPinning(null);
+    setPinConfirmRemove(false);
+    setImageLayers((cur) => cur.filter((l) => l.id !== id));
+    void run(async () => {
+      await jsend(`/api/layer/${id}`, "DELETE");
+    });
+  }
+
   /* ---- Keyboard ----------------------------------------------------------- */
 
   const switchMode = useCallback(
     (next: Mode) => {
+      // Positioning is modal: it ends with Done or Escape, not by a tool key
+      // quietly handing the map back while the render is still under the cursor.
+      if (pinningRef.current) return;
       if (next === mode) return;
       const busy = ptsRef.current.length > 0 || !!rectRef.current || !!blockRef.current;
       if (busy && pendingMode !== next) {
@@ -1646,6 +1957,10 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
   );
 
   const cancelCurrent = useCallback(() => {
+    if (pinningRef.current) {
+      stopPinning();
+      return;
+    }
     if (reshapeRef.current) {
       setReshapeBoth(null);
       setSelectedVertex(null);
@@ -1660,9 +1975,13 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
       chooseCopySource(null);
       setSelected(null);
     }
-  }, [chooseCopySource, clearDraft, setReshapeBoth]);
+  }, [chooseCopySource, clearDraft, setReshapeBoth, stopPinning]);
 
   const finishCurrent = useCallback(() => {
+    if (pinningRef.current) {
+      stopPinning();
+      return;
+    }
     if (reshapeRef.current) {
       setReshapeBoth(null);
       setSelectedVertex(null);
@@ -1673,7 +1992,7 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
     if (m === "split" && blockRef.current) return commitSplit();
     if (m === "copy" && copySrcRef.current) return commitCopy();
     finishPolygon();
-  }, [commitCopy, commitSplit, finishPolygon, finishRect, setReshapeBoth]);
+  }, [commitCopy, commitSplit, finishPolygon, finishRect, setReshapeBoth, stopPinning]);
 
   useEffect(() => {
     const isTyping = (t: EventTarget | null) => {
@@ -1834,6 +2153,14 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
   }, [block, copyLot, copyN, copyOff, copyRing, hover, liveRing, mode, pts, rect, reshape, splitPieces]);
 
   const hint = useMemo(() => {
+    // The bar speaks for whatever owns the map. While a render is being placed
+    // that is the render — leaving "click each corner of the lot" up would be
+    // instructions for a gesture that is currently switched off.
+    if (pinning) {
+      return pinMode === "transform"
+        ? "Line the render up with the imagery: drag it, resize from a corner, turn it with the top grip."
+        : "Drag one corner at a time to correct a render that wasn’t drawn straight down.";
+    }
     if (reshape) return "Drag a corner to move it, or a hollow midpoint to add one. Escape when you're done.";
     if (mode === "rect") {
       return rect
@@ -1854,13 +2181,14 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
     return pts.length === 0
       ? "Click each corner of the lot. Click the first corner again to finish."
       : "Keep clicking corners. Click the first corner to close the lot.";
-  }, [block, countyOn, copySrc, mode, pts.length, rect, reshape]);
+  }, [block, countyOn, copySrc, mode, pinMode, pinning, pts.length, rect, reshape]);
 
   /* ---- Actions in the bar ------------------------------------------------- */
 
   // Label and enablement only — the click runs `finishCurrent`, the same path
   // Enter takes, so the button and the key can never mean different things.
   const primaryAction = useMemo(() => {
+    if (pinning) return { label: "Done placing", enabled: true };
     if (reshape) return { label: "Done", enabled: true };
     if (mode === "rect") return { label: "Finish lot", enabled: !!rect };
     if (mode === "split")
@@ -1870,10 +2198,10 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
     if (mode === "copy")
       return { label: `Create ${copyN} ${copyN === 1 ? "copy" : "copies"}`, enabled: !!copySrc };
     return { label: "Finish lot", enabled: pts.length >= 3 };
-  }, [block, copyN, copySrc, mode, pts.length, rect, reshape, splitPieces.length]);
+  }, [block, copyN, copySrc, mode, pinning, pts.length, rect, reshape, splitPieces.length]);
 
   const canCancel =
-    !!reshape || pts.length > 0 || !!rect || !!block || (mode === "copy" && !!copySrc);
+    !!pinning || !!reshape || pts.length > 0 || !!rect || !!block || (mode === "copy" && !!copySrc);
 
   /* ---- The lot list ------------------------------------------------------- */
 
@@ -1993,7 +2321,7 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
       ro.disconnect();
       el.removeEventListener("scroll", check);
     };
-  }, [mode, block, copySrc, planOn, imageLayers.length]);
+  }, [mode, block, copySrc, planOn, pinning, imageLayers.length]);
 
   function onQuery(v: string) {
     setQuery(v);
@@ -2028,6 +2356,19 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
       {/* ---- Stage ---------------------------------------------------------- */}
       <div className="relative min-h-0 overflow-hidden rounded-[var(--radius-lg)] border border-line bg-stage shadow-[var(--shadow-card)]">
         <div ref={containerRef} className="absolute inset-0 h-full w-full" />
+
+        <input
+          ref={planFileRef}
+          type="file"
+          accept={[...LAYER_IMAGE_MIMES, "image/*"].join(",")}
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            // Cleared so re-picking the same file still fires a change event.
+            e.target.value = "";
+            if (f) void addPlan(f);
+          }}
+        />
 
         {/* Outlines, previews, ghosts. Pointer-transparent: the map's own click
             handler needs every press, and only grips (z-40) should take one. */}
@@ -2307,6 +2648,67 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
           </svg>
         )}
 
+        {/* The render's outline, and the target for dragging it bodily. Under
+            the floating chrome and transparent to pointers except on the quad
+            itself, so panning the map beside it still works. */}
+        {pinning && pinScreen.quad.length === 4 && (
+          <svg className="absolute inset-0 z-20 h-full w-full" style={{ pointerEvents: "none", touchAction: "none" }}>
+            <polygon
+              points={pinScreen.quad.map((q) => q.join(",")).join(" ")}
+              fill={PAINT.drawWash}
+              stroke={PAINT.draw}
+              strokeWidth={1.5}
+              strokeDasharray="7 5"
+              style={{ pointerEvents: "fill", cursor: "move" }}
+              onPointerDown={dragPinBody}
+            />
+            {pinMode === "transform" && pinScreen.rotate && (
+              <line
+                x1={(pinScreen.quad[0][0] + pinScreen.quad[1][0]) / 2}
+                y1={(pinScreen.quad[0][1] + pinScreen.quad[1][1]) / 2}
+                x2={pinScreen.rotate[0]}
+                y2={pinScreen.rotate[1]}
+                stroke={PAINT.draw}
+                strokeWidth={1.5}
+              />
+            )}
+          </svg>
+        )}
+
+        {/* Grips ride above the rail (z-40): a corner that happens to sit behind
+            a floating panel has to stay grabbable. */}
+        {pinning && pinScreen.quad.length === 4 && (
+          <svg className="absolute inset-0 z-40 h-full w-full" style={{ pointerEvents: "none", touchAction: "none" }}>
+            {pinMode === "transform" && pinScreen.rotate && (
+              <circle
+                cx={pinScreen.rotate[0]}
+                cy={pinScreen.rotate[1]}
+                r={8}
+                fill={PAINT.stage}
+                stroke={PAINT.draw}
+                strokeWidth={2}
+                style={{ pointerEvents: "all", cursor: "grab" }}
+                onPointerDown={dragPinRotate}
+              />
+            )}
+            {pinScreen.quad.map((q, i) => (
+              <rect
+                key={`pin${i}`}
+                x={q[0] - 7}
+                y={q[1] - 7}
+                width={14}
+                height={14}
+                rx={pinMode === "fine" ? 7 : 3}
+                fill={pinMode === "fine" ? PAINT.draw : "#ffffff"}
+                stroke={PAINT.stage}
+                strokeWidth={1.5}
+                style={{ pointerEvents: "all", cursor: pinMode === "fine" ? "crosshair" : "nwse-resize" }}
+                onPointerDown={(e) => dragPinCorner(e, i)}
+              />
+            ))}
+          </svg>
+        )}
+
         {/* ---- Tool rail --------------------------------------------------- */}
         {/* The rail is bounded by the stage and scrolls inside it. A short
             laptop viewport leaves ~310px here, and an expanded Split/Copy panel
@@ -2319,138 +2721,57 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
             railMore && "[mask-image:linear-gradient(to_bottom,#000_calc(100%-34px),transparent)]"
           )}
         >
-          <div className="glass-dark pointer-events-auto rounded-[var(--radius)] p-1.5">
-            <div className="flex items-baseline justify-between px-2 pb-1 pt-1">
-              <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/35">Tool</span>
-              <span className="font-mono text-[9px] tracking-[0.16em] text-white/25">KEYS 1–4</span>
-            </div>
-            {TOOLS.map((t) => (
-              <button
-                key={t.mode}
-                onClick={() => switchMode(t.mode)}
-                aria-pressed={mode === t.mode}
-                className={cx(
-                  "flex w-full items-center gap-2 rounded-[7px] py-[5px] pl-1 pr-2 text-left transition",
-                  FOCUS_DARK,
-                  mode === t.mode
-                    ? "bg-[rgba(216,178,106,0.16)] text-white"
-                    : "text-white/60 hover:bg-white/[0.07] hover:text-white",
-                  pendingMode === t.mode && "ring-1 ring-inset ring-[#d8b26a]"
-                )}
-              >
-                <span
-                  className={cx(
-                    "h-5 w-[3px] shrink-0 rounded-full transition",
-                    mode === t.mode ? "bg-[#d8b26a]" : "bg-transparent"
-                  )}
-                  aria-hidden="true"
-                />
-                <svg viewBox="0 0 16 16" className="h-4 w-4 shrink-0" aria-hidden="true">
-                  {t.glyph}
-                </svg>
-                <span className="flex-1 text-[12.5px] font-medium tracking-[-0.01em]">{t.name}</span>
-                <kbd className="rounded-[4px] border border-white/15 px-1 font-mono text-[9px] leading-[14px] text-white/40">
-                  {t.key}
-                </kbd>
-              </button>
-            ))}
+          {/* ---- Positioning a site plan ----------------------------------- */}
+          {/* Replaces the tool rail rather than sitting beside it: while a render
+              is being placed the drawing tools are stood down, and leaving them
+              on screen only invites a click that does nothing. */}
+          {pinning && (
+            <div className="glass-dark pointer-events-auto rounded-[var(--radius)] p-1.5">
+              <div className="flex items-baseline justify-between px-2 pb-1 pt-1">
+                <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/35">
+                  Place plan
+                </span>
+                <span className="font-mono text-[9px] tracking-[0.16em] text-white/25" aria-live="polite">
+                  {saving ? "SAVING" : "SAVED"}
+                </span>
+              </div>
 
-            {/* The tool names are terse by design; this is the line that says
-                what the selected one is actually for. */}
-            <p className="border-t border-white/10 px-2 pb-1 pt-2 text-[11px] leading-[1.4] text-white/45">
-              {TOOLS.find((t) => t.mode === mode)?.blurb}
-            </p>
+              <p className="truncate px-2 pb-1.5 text-[12px] text-white/70">
+                {pinLayer?.name ?? "Site plan"}
+              </p>
 
-            {/* Progressive disclosure: only the tool that needs setting up
-                shows its settings, and only once it has something to set. */}
-            {mode === "rect" && (
-              <div className="mt-1.5 border-t border-white/10 pt-1.5">
+              <div className="mx-1 flex rounded-[6px] border border-white/15 p-0.5">
+                {(["transform", "fine"] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setPinMode(m)}
+                    aria-pressed={pinMode === m}
+                    className={cx(
+                      "h-6 flex-1 rounded-[5px] text-[11px] font-medium transition",
+                      FOCUS_DARK,
+                      pinMode === m ? "bg-white text-[#0c0f16]" : "text-white/60 hover:text-white"
+                    )}
+                  >
+                    {m === "transform" ? "Move" : "Corners"}
+                  </button>
+                ))}
+              </div>
+
+              <p className="px-2 pb-1 pt-2 text-[11px] leading-[1.4] text-white/45">
+                {pinMode === "transform"
+                  ? "Drag the render to move it, a corner to resize, the top grip to turn it."
+                  : "Drag each corner on its own, for a render that wasn’t drawn straight down. Resizing squares it back up, so do this last."}
+              </p>
+
+              {pinMode === "transform" && (
                 <Toggle
-                  on={lockAngle}
-                  onClick={() => setLockAngle((v) => !v)}
-                  label="Keep this angle"
-                  note={
-                    lockAngle
-                      ? `Every lot at ${degrees(lastRot)}°`
-                      : "Each lot starts square to north"
-                  }
+                  on={pinLockAspect}
+                  onClick={() => setPinLockAspect((v) => !v)}
+                  label="Lock aspect"
+                  note={pinLockAspect ? "Corners keep the shape" : "Corners stretch it"}
                 />
-              </div>
-            )}
+              )}
 
-            {mode === "split" && block && (
-              <div className="mt-1.5 border-t border-white/10 px-2 pb-1 pt-2.5">
-                <Stepper
-                  label="Lots"
-                  value={splitN}
-                  min={MIN_LOTS}
-                  max={MAX_SPLIT}
-                  onChange={setSplitCount}
-                />
-                <button
-                  onClick={() => setSplitAxis((a) => (a === 0 ? 1 : 0))}
-                  className={cx(
-                    "mt-2 flex w-full items-center justify-between rounded-[6px] border border-white/15 px-2 py-1.5 text-[11.5px] text-white/70 transition hover:bg-white/[0.07] hover:text-white",
-                    FOCUS_DARK
-                  )}
-                >
-                  Turn the cuts
-                  <span className="font-mono text-[10px] tracking-[0.12em] text-white/40">⇄</span>
-                </button>
-                <p className="mt-2 font-mono text-[9.5px] uppercase tracking-[0.14em] text-white/35">
-                  Creates lots {nextLot}–{nextLot + Math.max(0, splitPieces.length - 1)}
-                </p>
-              </div>
-            )}
-
-            {mode === "copy" && copyLot && (
-              <div className="mt-1.5 border-t border-white/10 px-2 pb-1 pt-2.5">
-                <Stepper label="Copies" value={copyN} min={1} max={MAX_COPIES} onChange={setCopyN} />
-                <div className="mt-2 flex gap-1.5">
-                  <button
-                    onClick={() => copyOff && setCopyOverride([-copyOff[0], -copyOff[1]])}
-                    className={cx(
-                      "flex-1 rounded-[6px] border border-white/15 px-2 py-1.5 text-[11.5px] text-white/70 transition hover:bg-white/[0.07] hover:text-white",
-                      FOCUS_DARK
-                    )}
-                  >
-                    Other way
-                  </button>
-                  <button
-                    onClick={() => setCopyOverride(null)}
-                    disabled={!copyOverride}
-                    className={cx(
-                      "flex-1 rounded-[6px] border border-white/15 px-2 py-1.5 text-[11.5px] text-white/70 transition hover:bg-white/[0.07] hover:text-white disabled:pointer-events-none disabled:opacity-35",
-                      FOCUS_DARK
-                    )}
-                  >
-                    Flush again
-                  </button>
-                </div>
-                <p className="mt-2 font-mono text-[9.5px] uppercase tracking-[0.14em] text-white/35">
-                  From lot {copyLot.lot_number} · creates {nextLot}–{nextLot + copyN - 1}
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* Precision + reference */}
-          <div className="glass-dark pointer-events-auto rounded-[var(--radius)] p-1.5">
-            <Toggle
-              on={snapOn}
-              onClick={() => setSnapOn((v) => !v)}
-              label="Snap to corners"
-              note="Hold ⌥ to suspend"
-            />
-            <div className="mx-2 my-1 h-px bg-white/10" />
-            <Toggle
-              on={planOn}
-              disabled={imageLayers.length === 0}
-              onClick={() => setPlanOn((v) => !v)}
-              label="Trace site plan"
-              note={imageLayers.length === 0 ? "None pinned yet" : `${imageLayers.length} pinned`}
-            />
-            {planOn && imageLayers.length > 0 && (
               <label className="flex items-center gap-2 px-2 pb-1.5 pt-1">
                 <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-white/35">Fade</span>
                 <input
@@ -2467,7 +2788,233 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
                   {Math.round(planOpacity * 100)}%
                 </span>
               </label>
+
+              <div className="mt-1 flex gap-1.5 border-t border-white/10 px-1 pt-2">
+                <button
+                  onClick={() => pinCornersRef.current && frameCorners(pinCornersRef.current)}
+                  className={cx(
+                    "flex-1 rounded-[6px] border border-white/15 px-2 py-1.5 text-[11.5px] text-white/70 transition hover:bg-white/[0.07] hover:text-white",
+                    FOCUS_DARK
+                  )}
+                >
+                  Zoom to it
+                </button>
+                <button
+                  onClick={stopPinning}
+                  className={cx(
+                    "flex-1 rounded-[6px] bg-[linear-gradient(180deg,#8b6d3d,#6a5230)] px-2 py-1.5 text-[11.5px] font-semibold text-white transition hover:brightness-110",
+                    FOCUS_DARK
+                  )}
+                >
+                  Done
+                </button>
+              </div>
+
+              <button
+                onClick={() => (pinConfirmRemove ? removePlan() : setPinConfirmRemove(true))}
+                onBlur={() => setPinConfirmRemove(false)}
+                className={cx(
+                  "mx-1 mt-1 block w-[calc(100%-8px)] rounded-[6px] px-2 py-1.5 text-[11px] transition",
+                  FOCUS_DARK,
+                  pinConfirmRemove
+                    ? "bg-[rgba(190,74,74,0.22)] text-white"
+                    : "text-white/40 hover:bg-white/[0.06] hover:text-white/70"
+                )}
+              >
+                {pinConfirmRemove ? "Remove this plan — click again" : "Remove plan"}
+              </button>
+            </div>
+          )}
+
+          {!pinning && (
+            <div className="glass-dark pointer-events-auto rounded-[var(--radius)] p-1.5">
+              <div className="flex items-baseline justify-between px-2 pb-1 pt-1">
+                <span className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/35">Tool</span>
+                <span className="font-mono text-[9px] tracking-[0.16em] text-white/25">KEYS 1–4</span>
+              </div>
+              {TOOLS.map((t) => (
+                <button
+                  key={t.mode}
+                  onClick={() => switchMode(t.mode)}
+                  aria-pressed={mode === t.mode}
+                  className={cx(
+                    "flex w-full items-center gap-2 rounded-[7px] py-[5px] pl-1 pr-2 text-left transition",
+                    FOCUS_DARK,
+                    mode === t.mode
+                      ? "bg-[rgba(216,178,106,0.16)] text-white"
+                      : "text-white/60 hover:bg-white/[0.07] hover:text-white",
+                    pendingMode === t.mode && "ring-1 ring-inset ring-[#d8b26a]"
+                  )}
+                >
+                  <span
+                    className={cx(
+                      "h-5 w-[3px] shrink-0 rounded-full transition",
+                      mode === t.mode ? "bg-[#d8b26a]" : "bg-transparent"
+                    )}
+                    aria-hidden="true"
+                  />
+                  <svg viewBox="0 0 16 16" className="h-4 w-4 shrink-0" aria-hidden="true">
+                    {t.glyph}
+                  </svg>
+                  <span className="flex-1 text-[12.5px] font-medium tracking-[-0.01em]">{t.name}</span>
+                  <kbd className="rounded-[4px] border border-white/15 px-1 font-mono text-[9px] leading-[14px] text-white/40">
+                    {t.key}
+                  </kbd>
+                </button>
+              ))}
+
+              {/* The tool names are terse by design; this is the line that says
+                  what the selected one is actually for. */}
+              <p className="border-t border-white/10 px-2 pb-1 pt-2 text-[11px] leading-[1.4] text-white/45">
+                {TOOLS.find((t) => t.mode === mode)?.blurb}
+              </p>
+
+              {/* Progressive disclosure: only the tool that needs setting up
+                  shows its settings, and only once it has something to set. */}
+              {mode === "rect" && (
+                <div className="mt-1.5 border-t border-white/10 pt-1.5">
+                  <Toggle
+                    on={lockAngle}
+                    onClick={() => setLockAngle((v) => !v)}
+                    label="Keep this angle"
+                    note={
+                      lockAngle
+                        ? `Every lot at ${degrees(lastRot)}°`
+                        : "Each lot starts square to north"
+                    }
+                  />
+                </div>
+              )}
+
+              {mode === "split" && block && (
+                <div className="mt-1.5 border-t border-white/10 px-2 pb-1 pt-2.5">
+                  <Stepper
+                    label="Lots"
+                    value={splitN}
+                    min={MIN_LOTS}
+                    max={MAX_SPLIT}
+                    onChange={setSplitCount}
+                  />
+                  <button
+                    onClick={() => setSplitAxis((a) => (a === 0 ? 1 : 0))}
+                    className={cx(
+                      "mt-2 flex w-full items-center justify-between rounded-[6px] border border-white/15 px-2 py-1.5 text-[11.5px] text-white/70 transition hover:bg-white/[0.07] hover:text-white",
+                      FOCUS_DARK
+                    )}
+                  >
+                    Turn the cuts
+                    <span className="font-mono text-[10px] tracking-[0.12em] text-white/40">⇄</span>
+                  </button>
+                  <p className="mt-2 font-mono text-[9.5px] uppercase tracking-[0.14em] text-white/35">
+                    Creates lots {nextLot}–{nextLot + Math.max(0, splitPieces.length - 1)}
+                  </p>
+                </div>
+              )}
+
+              {mode === "copy" && copyLot && (
+                <div className="mt-1.5 border-t border-white/10 px-2 pb-1 pt-2.5">
+                  <Stepper label="Copies" value={copyN} min={1} max={MAX_COPIES} onChange={setCopyN} />
+                  <div className="mt-2 flex gap-1.5">
+                    <button
+                      onClick={() => copyOff && setCopyOverride([-copyOff[0], -copyOff[1]])}
+                      className={cx(
+                        "flex-1 rounded-[6px] border border-white/15 px-2 py-1.5 text-[11.5px] text-white/70 transition hover:bg-white/[0.07] hover:text-white",
+                        FOCUS_DARK
+                      )}
+                    >
+                      Other way
+                    </button>
+                    <button
+                      onClick={() => setCopyOverride(null)}
+                      disabled={!copyOverride}
+                      className={cx(
+                        "flex-1 rounded-[6px] border border-white/15 px-2 py-1.5 text-[11.5px] text-white/70 transition hover:bg-white/[0.07] hover:text-white disabled:pointer-events-none disabled:opacity-35",
+                        FOCUS_DARK
+                      )}
+                    >
+                      Flush again
+                    </button>
+                  </div>
+                  <p className="mt-2 font-mono text-[9.5px] uppercase tracking-[0.14em] text-white/35">
+                    From lot {copyLot.lot_number} · creates {nextLot}–{nextLot + copyN - 1}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Precision + reference */}
+          <div className="glass-dark pointer-events-auto rounded-[var(--radius)] p-1.5">
+            <Toggle
+              on={snapOn}
+              onClick={() => setSnapOn((v) => !v)}
+              label="Snap to corners"
+              note="Hold ⌥ to suspend"
+            />
+            <div className="mx-2 my-1 h-px bg-white/10" />
+            <Toggle
+              on={planOn}
+              disabled={imageLayers.length === 0}
+              onClick={() => setPlanOn((v) => !v)}
+              label="Trace site plan"
+              note={imageLayers.length === 0 ? "Add a render below" : `${imageLayers.length} pinned`}
+            />
+            {planOn && imageLayers.length > 0 && (
+              <>
+                <label className="flex items-center gap-2 px-2 pb-1.5 pt-1">
+                  <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-white/35">Fade</span>
+                  <input
+                    type="range"
+                    min={0.15}
+                    max={1}
+                    step={0.05}
+                    value={planOpacity}
+                    onChange={(e) => setPlanOpacity(Number(e.target.value))}
+                    className="h-1 flex-1 accent-[#d8b26a]"
+                    aria-label="Site plan opacity"
+                  />
+                  <span className="w-8 shrink-0 text-right font-mono text-[10px] tabular-nums text-white/55">
+                    {Math.round(planOpacity * 100)}%
+                  </span>
+                </label>
+                {/* Every pinned render is listed, not just the one added here:
+                    a plan pinned back on Map Design is the same row, and it is
+                    just as likely to be the one sitting a few metres off. */}
+                <div className="px-1 pb-0.5">
+                  {imageLayers.map((l) => (
+                    <div key={l.id} className="flex items-center gap-1.5 py-[2px] pl-1">
+                      <span className="min-w-0 flex-1 truncate text-[11.5px] text-white/55">{l.name}</span>
+                      <button
+                        onClick={() => startPinning(l.id)}
+                        className={cx(
+                          "shrink-0 rounded-[5px] border border-white/15 px-1.5 py-[3px] text-[10.5px] text-white/60 transition hover:bg-white/[0.07] hover:text-white",
+                          FOCUS_DARK
+                        )}
+                      >
+                        Place
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
+            {/* The render usually arrives with the operator, not before them:
+                pinning it here saves a round trip to Map Design mid-trace. */}
+            <button
+              onClick={() => planFileRef.current?.click()}
+              disabled={!!planBusy}
+              className={cx(
+                "mx-1 mt-0.5 mb-0.5 flex w-[calc(100%-8px)] items-center gap-1.5 rounded-[6px] border border-dashed border-white/15 px-2 py-1.5 text-[11.5px] text-white/55 transition hover:border-white/30 hover:bg-white/[0.06] hover:text-white disabled:pointer-events-none disabled:opacity-50",
+                FOCUS_DARK
+              )}
+            >
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0" fill="none" aria-hidden="true">
+                <rect x="1.75" y="3.25" width="12.5" height="9.5" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                <path d="M2.5 10.5 6 7.5l2.5 2 2-1.5 3 2.5" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+                <circle cx="5.75" cy="6" r="1" fill="currentColor" />
+              </svg>
+              {planBusy ?? (imageLayers.length ? "Pin another render" : "Pin a site plan")}
+            </button>
             <Toggle
               on={countyOn}
               onClick={() => {
@@ -2617,7 +3164,7 @@ export default function ParcelDrawEditor({ slug, className }: { slug: string; cl
               <Measure {...measure.third} />
               <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
                 <span className="font-mono text-[10px] tracking-[0.12em] text-white/40" aria-live="polite">
-                  {saving ? "SAVING" : `NEXT ${nextLot}`}
+                  {saving ? "SAVING" : pinning ? "PLACING" : `NEXT ${nextLot}`}
                 </span>
                 {canCancel && (
                   <button
