@@ -98,6 +98,16 @@ create index if not exists parcels_dev on parcels(development_id);
 alter table parcels
   add column if not exists geometry_locked boolean not null default false;
 
+-- Text the operator typed to print on this lot instead of the development-wide
+-- label ("Model home", "Clubhouse"). Null → the lot gets the usual label. Not in
+-- the re-import upsert's update list, so a county refresh never wipes it.
+alter table parcels
+  add column if not exists map_label text;
+-- Its smaller second line ("Opens spring 2027"), replacing the usual second
+-- line the same way. Independent of map_label: either can be set alone.
+alter table parcels
+  add column if not exists map_label2 text;
+
 create table if not exists publications (
   id             text primary key,
   development_id text not null references developments(id) on delete cascade,

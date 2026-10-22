@@ -192,7 +192,9 @@ export type CoreKey =
   | "parcel_acres"
   | "image_url"
   | "video_url"
-  | "lot_page_url";
+  | "lot_page_url"
+  | "map_label"
+  | "map_label2";
 
 export const CORE_TARGETS: Array<{ key: CoreKey; label: string }> = [
   { key: "lot_number", label: "Lot number" },
@@ -202,6 +204,8 @@ export const CORE_TARGETS: Array<{ key: CoreKey; label: string }> = [
   { key: "image_url", label: "Image URL" },
   { key: "video_url", label: "Video URL" },
   { key: "lot_page_url", label: "Lot page URL" },
+  { key: "map_label", label: "Custom map label" },
+  { key: "map_label2", label: "Custom map label, line 2" },
 ];
 
 // Header spellings (normKey'd) that map straight onto a core field or status.
@@ -213,6 +217,8 @@ const HEADER_GUESSES: Array<[CoreKey | "status", string[]]> = [
   ["image_url", ["imageurl", "image", "photo", "photourl", "picture", "imagelink"]],
   ["video_url", ["videourl", "video", "videolink", "tour", "toururl"]],
   ["lot_page_url", ["lotpageurl", "lotpage", "pageurl", "listingurl", "weburl", "website", "link", "url"]],
+  ["map_label", ["maplabel", "customlabel", "displaylabel", "label"]],
+  ["map_label2", ["maplabel2", "customlabel2", "label2", "secondline", "line2", "sublabel", "subtitle"]],
   ["status", ["status", "salesstatus", "salestatus", "availability", "lotstatus"]],
 ];
 

@@ -1,6 +1,7 @@
 import { getDevelopment, updateAppearance } from "@/lib/repo";
 import { ok, fail } from "@/lib/http";
 import { BASEMAP_PRESETS, type Basemap, type MapAppearance } from "@/lib/types";
+import { readLotLabels } from "@/lib/lotLabels";
 
 export const runtime = "nodejs";
 
@@ -25,6 +26,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ slug: 
     terrainExaggeration: clamp(body.terrainExaggeration, dev.map_appearance.terrainExaggeration ?? 1.5, 0, 3),
     satelliteHueRotate: clamp(body.satelliteHueRotate, dev.map_appearance.satelliteHueRotate ?? 0, -180, 180),
     satelliteSaturation: clamp(body.satelliteSaturation, dev.map_appearance.satelliteSaturation ?? 0, -1, 1),
+    // Partial updates merge over what's stored, so a basemap change can't reset them.
+    lotLabels: readLotLabels(body.lotLabels, readLotLabels(dev.map_appearance.lotLabels)),
   };
   await updateAppearance(dev.id, next);
   return ok(next);

@@ -319,6 +319,8 @@ function toFeature(r: ParcelJoin): GeoJSON.Feature {
       video_url: r.video_url,
       lot_page_url: r.lot_page_url,
       owner_name: r.owner_name,
+      map_label: r.map_label ?? null,
+      map_label2: r.map_label2 ?? null,
       ...custom,
     },
   };
@@ -663,6 +665,8 @@ const CSV_CORE = [
   "image_url",
   "video_url",
   "lot_page_url",
+  "map_label",
+  "map_label2",
 ] as const;
 
 // Colors handed to statuses a CSV import creates — distinct from the seeded
@@ -765,6 +769,8 @@ const PARCEL_FIELDS = new Set([
   "image_url",
   "video_url",
   "lot_page_url",
+  "map_label",
+  "map_label2",
 ]);
 
 export async function updateParcel(

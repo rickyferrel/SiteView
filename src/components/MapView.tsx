@@ -7,6 +7,7 @@ import type { MapConfig, Status, Filter, FieldDef, DataState, Layer } from "@/li
 import { resolveMapStyle, hideLegacyLotLayers, applySatelliteTint, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
 import { syncLayers, setLayerVisible, shapeHitLayerIds } from "@/lib/mapLayers";
 import { shapeInfo, type ShapeInfo } from "@/lib/layers";
+import { readLotLabels, withLotLabels, lotLabelLayer } from "@/lib/lotLabels";
 import { cameraFor, holdCamera, readCamera, type Camera } from "@/lib/camera";
 import { money, acres } from "@/lib/format";
 import { videoEmbed, isHttpUrl, type VideoEmbed } from "@/lib/video";
@@ -123,7 +124,9 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
         return;
       }
       const cfg = (await cRes.json()) as MapConfig;
-      const fc = (await pRes.json()) as GeoJSON.FeatureCollection;
+      const appearance = cfg.development.map_appearance ?? DEFAULT_APPEARANCE;
+      const labels = readLotLabels(appearance.lotLabels);
+      const fc = withLotLabels((await pRes.json()) as GeoJSON.FeatureCollection, labels, cfg.fields);
       if (cancelled || !containerRef.current) return;
       setConfig(cfg);
       fcRef.current = fc;
@@ -132,7 +135,6 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
       const namedStop = stop ? cfg.development.stop_views[stop] : undefined;
       const view = namedStop ?? cfg.development.default_view;
       const usingNamedStop = !!namedStop;
-      const appearance = cfg.development.map_appearance ?? DEFAULT_APPEARANCE;
 
       // Resolve the stored view against this container, so a phone-sized iframe
       // frames the same ground the operator framed in the portal. The container
@@ -249,17 +251,7 @@ export default function MapView({ slug, state, stop, ribbon = true, edit = false
           source: "parcels",
           paint: { "line-color": "#ffffff", "line-width": 1, "line-opacity": 0.5 },
         });
-        map.addLayer({
-          id: LABEL,
-          type: "symbol",
-          source: "parcels",
-          layout: {
-            "text-field": ["coalesce", ["get", "lot_number"], ""] as unknown as string,
-            "text-size": 12,
-            "text-allow-overlap": false,
-          },
-          paint: { "text-color": "#ffffff", "text-halo-color": "#000000", "text-halo-width": 1, "text-opacity": 0.85 },
-        });
+        map.addLayer(lotLabelLayer(LABEL, "parcels", labels));
         map.addLayer({
           id: SEL_FILL,
           type: "fill",

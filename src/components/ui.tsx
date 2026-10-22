@@ -199,6 +199,38 @@ export function TextInput({
 
 export const fieldClass = (extra = "") => cx(FIELD_BASE, "h-9", extra);
 
+export function Toggle({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={cx(
+        "relative h-6 w-11 shrink-0 rounded-full border transition",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/15",
+        checked ? "border-ink bg-ink" : "border-line bg-panel-2"
+      )}
+    >
+      <span
+        className={cx(
+          "absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-[0_1px_2px_rgba(13,19,32,0.3)] transition-all",
+          checked ? "left-[22px]" : "left-[2px]"
+        )}
+      />
+    </button>
+  );
+}
+
 /* ---- SaveState: the one shared save-feedback instrument ------------------- */
 /* Every onBlur-saving surface routes mutation feedback through this so a save
    always *feels* acknowledged the same way. Purely presentational — it renders

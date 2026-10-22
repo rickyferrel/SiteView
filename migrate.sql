@@ -88,6 +88,13 @@ create index if not exists parcels_dev on parcels(development_id);
 alter table parcels
   add column if not exists geometry_locked boolean not null default false;
 
+-- Per-lot custom map label and its second line, overriding the development-wide
+-- ones. See src/lib/schema.ts.
+alter table parcels
+  add column if not exists map_label text;
+alter table parcels
+  add column if not exists map_label2 text;
+
 create table if not exists publications (
   id             text primary key,
   development_id text not null references developments(id) on delete cascade,

@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
-import type { MapConfig, Status, ViewState } from "@/lib/types";
+import type { FieldDef, LotLabels, MapConfig, Status, ViewState } from "@/lib/types";
 import { resolveMapStyle, hideLegacyLotLayers, applySatelliteTint, DEFAULT_APPEARANCE, STANDARD_CONFIG } from "@/lib/types";
 import { cameraFor, holdCamera, readCamera } from "@/lib/camera";
+import { readLotLabels, withLotLabels, lotLabelLayer, applyLotLabels } from "@/lib/lotLabels";
 import { jsend } from "@/lib/client";
 import { cx } from "@/components/ui";
 
@@ -66,14 +67,19 @@ type Props = {
   onSaved?: (view: ViewState) => void;
   // Fires after resetting back to auto-fit.
   onReset?: () => void;
+  // Label settings newer than the stored config — Map Design passes its unsaved-
+  // to-publish edits so the framed shot shows the labels visitors will get.
+  labels?: LotLabels;
 };
 
 type Phase = "idle" | "saving" | "saved";
 
-export default function OpeningViewEditor({ slug, className, onSaved, onReset }: Props) {
+export default function OpeningViewEditor({ slug, className, onSaved, onReset, labels }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const fcRef = useRef<GeoJSON.FeatureCollection | null>(null);
+  const fieldsRef = useRef<FieldDef[]>([]);
+  const labelsRef = useRef(labels);
 
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,11 +105,13 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
       const fc = (await pRes.json()) as GeoJSON.FeatureCollection;
       if (cancelled || !containerRef.current) return;
       fcRef.current = fc;
+      fieldsRef.current = cfg.fields;
       setLocked(cfg.development.view_locked);
 
       mapboxgl.accessToken = cfg.development.mapbox_token;
       const view = cfg.development.default_view;
       const appearance = cfg.development.map_appearance ?? DEFAULT_APPEARANCE;
+      const lotLabels = labelsRef.current ?? readLotLabels(appearance.lotLabels);
 
       // Open on the saved view resolved for this box — the same resolution the
       // embed does — so re-opening the editor shows the shot as it was framed.
@@ -160,7 +168,11 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
           map.setTerrain({ source: "mapbox-dem", exaggeration });
         }
 
-        map.addSource("parcels", { type: "geojson", data: fc, promoteId: "parcel_id" });
+        map.addSource("parcels", {
+          type: "geojson",
+          data: withLotLabels(fc, lotLabels, cfg.fields),
+          promoteId: "parcel_id",
+        });
         map.addLayer({
           id: FILL,
           type: "fill",
@@ -174,17 +186,7 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
           source: "parcels",
           paint: { "line-color": "#ffffff", "line-width": 1, "line-opacity": 0.5 },
         });
-        map.addLayer({
-          id: LABEL,
-          type: "symbol",
-          source: "parcels",
-          layout: {
-            "text-field": ["coalesce", ["get", "lot_number"], ""] as unknown as string,
-            "text-size": 12,
-            "text-allow-overlap": false,
-          },
-          paint: { "text-color": "#ffffff", "text-halo-color": "#000000", "text-halo-width": 1, "text-opacity": 0.85 },
-        });
+        map.addLayer(lotLabelLayer(LABEL, "parcels", lotLabels));
 
         // If no view is locked yet, open on the same auto-fit the public map
         // currently uses, so the operator adjusts from what visitors see today.
@@ -214,6 +216,17 @@ export default function OpeningViewEditor({ slug, className, onSaved, onReset }:
       mapRef.current = null;
     };
   }, [slug]);
+
+  useEffect(() => {
+    labelsRef.current = labels; // a map still loading picks these up when it lands
+    const map = mapRef.current;
+    const fc = fcRef.current;
+    if (!labels || !map || !fc || !map.getLayer(LABEL)) return;
+    (map.getSource("parcels") as mapboxgl.GeoJSONSource | undefined)?.setData(
+      withLotLabels(fc, labels, fieldsRef.current)
+    );
+    applyLotLabels(map, LABEL, labels);
+  }, [labels]);
 
   // Capture the camera *and* the box it was framed in — zoom alone doesn't
   // describe a framing, so the embed needs the reference size to reproduce it

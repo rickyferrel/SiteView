@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { devPath } from "@/lib/const";
 import { jget, jsend } from "@/lib/client";
@@ -23,7 +24,7 @@ import {
 } from "@/components/ui";
 
 type Props = Record<string, unknown>;
-const CORE = ["lot_number", "property_address", "list_price", "parcel_acres", "image_url", "video_url", "lot_page_url"] as const;
+const CORE = ["lot_number", "property_address", "list_price", "parcel_acres", "image_url", "video_url", "lot_page_url", "map_label", "map_label2"] as const;
 
 export default function LotsPage() {
   const { slug } = useParams<{ slug: string }>();
@@ -79,7 +80,7 @@ export default function LotsPage() {
     const s = q.trim().toLowerCase();
     if (!s) return all;
     return all.filter((r) =>
-      [r.lot_number, r.parcel_id, r.property_address, r.status].some((v) => String(v ?? "").toLowerCase().includes(s))
+      [r.lot_number, r.parcel_id, r.property_address, r.status, r.map_label, r.map_label2].some((v) => String(v ?? "").toLowerCase().includes(s))
     );
   }, [all, q]);
 
@@ -229,6 +230,14 @@ export default function LotsPage() {
                           <span className="font-mono text-[13px] font-medium text-ink tabular-nums">
                             {String(r.lot_number ?? r.parcel_id ?? "—")}
                           </span>
+                          {r.map_label || r.map_label2 ? (
+                            <span
+                              title="Custom map label"
+                              className="ml-2 inline-block max-w-[9rem] truncate rounded-[var(--radius-sm)] border border-line bg-panel-2 px-1.5 py-px align-middle text-[11px] text-graphite"
+                            >
+                              {[r.map_label, r.map_label2].filter(Boolean).map(String).join(" / ")}
+                            </span>
+                          ) : null}
                         </td>
                         <td className="max-w-xs truncate px-4 py-2.5 text-graphite">
                           {String(r.property_address ?? "") || <span className="text-faint">—</span>}
@@ -410,6 +419,7 @@ function EditDrawer({
   onSave: (patch: Record<string, unknown>, properties: Record<string, unknown>, statusName?: string) => void;
   onDelete: () => void;
 }) {
+  const { slug } = useParams<{ slug: string }>();
   const [form, setForm] = useState<Props>({ ...row });
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const set = (k: string, v: unknown) => setForm((f) => ({ ...f, [k]: v }));
@@ -417,6 +427,9 @@ function EditDrawer({
   function save() {
     const patch: Record<string, unknown> = {};
     for (const k of CORE) patch[k] = form[k] ?? null;
+    // Blank means "no custom label", not "print an empty one".
+    patch.map_label = String(form.map_label ?? "").trim() || null;
+    patch.map_label2 = String(form.map_label2 ?? "").trim() || null;
     const properties: Record<string, unknown> = {};
     for (const fd of fields) properties[fd.key] = form[fd.key] ?? null;
     onSave(patch, properties, String(form.status ?? ""));
@@ -463,6 +476,31 @@ function EditDrawer({
             </Field>
             <Field label="Lot number">
               <TextInput value={form.lot_number} onChange={(v) => set("lot_number", v)} />
+            </Field>
+            <Field label="Custom map label">
+              <TextInput
+                value={form.map_label}
+                onChange={(v) => set("map_label", v)}
+                placeholder="e.g. Model home"
+              />
+            </Field>
+            <Field label="Custom map label, second line (smaller)">
+              <TextInput
+                value={form.map_label2}
+                onChange={(v) => set("map_label2", v)}
+                placeholder="e.g. Opens spring 2027"
+              />
+              <p className="mt-1.5 text-[12px] text-faint">
+                Printed on this lot instead of its usual label. Leave a line blank to keep its usual text. Font,
+                size and color are set in{" "}
+                <Link
+                  href={`${devPath(slug, "design")}#lot-labels`}
+                  className="text-graphite underline decoration-line underline-offset-2 hover:text-ink"
+                >
+                  Map Design → Lot labels
+                </Link>
+                .
+              </p>
             </Field>
             <Field label="Address">
               <TextInput value={form.property_address} onChange={(v) => set("property_address", v)} />

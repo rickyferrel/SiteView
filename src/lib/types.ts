@@ -25,6 +25,51 @@ export type MapAppearance = {
   // the operator counteract off-season (e.g. winter/dead-grass) aerial photos.
   satelliteHueRotate: number; // degrees, -180..180
   satelliteSaturation: number; // -1..1
+  // The text printed on each lot. Optional because rows and publications from
+  // before it existed don't carry it — always read through `readLotLabels()`,
+  // which fills the gaps from DEFAULT_LOT_LABELS (the look those maps had).
+  lotLabels?: LotLabels;
+};
+
+export type LabelWeight = "regular" | "medium" | "bold";
+
+export type LotLabels = {
+  show: boolean;
+  // What each lot says: a parcel property key — a core column (lot_number,
+  // list_price, …) or a custom field's key. `field2` adds a smaller second
+  // line; "" → one line.
+  field: string;
+  field2: string;
+  prefix: string; // put in front of line one when it has a value: "Lot " → "Lot 12"
+  font: string; // a family from LABEL_FONTS in lib/lotLabels.ts
+  weight: LabelWeight;
+  size: number; // px
+  uppercase: boolean;
+  letterSpacing: number; // em
+  color: string;
+  haloColor: string;
+  haloWidth: number; // px; 0 → no outline
+  opacity: number; // 0..1
+  minZoom: number; // hidden when zoomed out past this; 0 → always shown
+  allowOverlap: boolean; // false → Mapbox drops labels that would collide
+};
+
+export const DEFAULT_LOT_LABELS: LotLabels = {
+  show: true,
+  field: "lot_number",
+  field2: "",
+  prefix: "",
+  font: "Open Sans",
+  weight: "regular",
+  size: 12,
+  uppercase: false,
+  letterSpacing: 0,
+  color: "#ffffff",
+  haloColor: "#000000",
+  haloWidth: 1,
+  opacity: 0.85,
+  minZoom: 0,
+  allowOverlap: false,
 };
 
 export const DEFAULT_APPEARANCE: MapAppearance = {
@@ -196,6 +241,10 @@ export type Parcel = {
   video_url: string | null;
   lot_page_url: string | null;
   owner_name: string | null;
+  /** Typed text printed on this lot in place of the usual label. */
+  map_label: string | null;
+  /** Typed text for the smaller second line, in place of the usual one. */
+  map_label2: string | null;
   properties: Record<string, unknown>;
   source_attrs: Record<string, unknown>;
   /** Drawn/reshaped by hand — county re-import must not overwrite the outline. */

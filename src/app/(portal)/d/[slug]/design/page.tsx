@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { jget, jsend } from "@/lib/client";
-import type { Status, FieldDef, Filter, FieldType, MapAppearance } from "@/lib/types";
+import type { Status, FieldDef, Filter, FieldType, MapAppearance, LotLabels } from "@/lib/types";
 import { BASEMAP_OPTIONS } from "@/lib/types";
 import OpeningViewEditor from "@/components/OpeningViewEditor";
 import LayersPanel from "@/components/LayersPanel";
+import LotLabelsPanel from "@/components/LotLabelsPanel";
 import {
   PageHeader,
   Section,
@@ -17,6 +18,7 @@ import {
   SaveState,
   EmptyState,
   Skeleton,
+  Toggle,
   fieldClass,
   cx,
 } from "@/components/ui";
@@ -56,6 +58,9 @@ export default function DesignPage() {
   const [fields, setFields] = useState<FieldDef[]>([]);
   const [filters, setFilters] = useState<Filter[]>([]);
   const [appearance, setAppearance] = useState<MapAppearance | null>(null);
+  // The label look as last saved here, handed to the opening-view map below so
+  // it doesn't keep framing the shot with labels the operator just restyled.
+  const [savedLabels, setSavedLabels] = useState<LotLabels | undefined>();
   const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
@@ -93,12 +98,22 @@ export default function DesignPage() {
       <PageHeader
         eyebrow={`Map design · ${name || "…"}`}
         title="Map Design"
-        description="Statuses, custom fields, public filters, and how the basemap renders. Changes apply on the next preview or publish."
+        description="Statuses, custom fields, public filters, lot labels, and how the basemap renders. Changes apply on the next preview or publish."
       />
 
       {/* ── HOW IT RENDERS ── the map's physical look */}
       <SubSection eyebrow="How it renders" caption="Appearance">
         <MapAppearanceSection slug={slug} appearance={appearance} loaded={loaded} reload={load} />
+      </SubSection>
+
+      {/* ── WHAT EACH LOT SAYS ── the text printed on every lot */}
+      <SubSection id="lot-labels" eyebrow="What each lot says" caption="Lot labels">
+        <LotLabelsPanel
+          slug={slug}
+          appearance={loaded ? appearance : null}
+          fields={fields}
+          onSaved={setSavedLabels}
+        />
       </SubSection>
 
       {/* ── WHERE IT OPENS ── the camera the public map lands on */}
@@ -107,7 +122,7 @@ export default function DesignPage() {
           title="Opening view"
           hint="The camera the public map lands on. Frame it below, then save — leave it on auto-fit to always frame the lot cluster."
         >
-          <OpeningViewEditor slug={slug} className="h-[440px] w-full" />
+          <OpeningViewEditor slug={slug} className="h-[440px] w-full" labels={savedLabels} />
         </Section>
       </SubSection>
 
@@ -133,16 +148,18 @@ export default function DesignPage() {
 /* ---- Sub-section label: mono eyebrow over a hairline rule ----------------- */
 
 function SubSection({
+  id,
   eyebrow,
   caption,
   children,
 }: {
+  id?: string;
   eyebrow: string;
   caption: string;
   children: React.ReactNode;
 }) {
   return (
-    <section className="space-y-4">
+    <section id={id} className="scroll-mt-20 space-y-4">
       <div>
         <div className="flex items-baseline justify-between gap-3">
           <Eyebrow>{eyebrow}</Eyebrow>
@@ -358,28 +375,6 @@ function MapAppearanceSection({
         </div>
       )}
     </Section>
-  );
-}
-
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={cx(
-        "relative h-6 w-11 shrink-0 rounded-full border transition",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/15",
-        checked ? "border-ink bg-ink" : "border-line bg-panel-2"
-      )}
-    >
-      <span
-        className={cx(
-          "absolute top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow-[0_1px_2px_rgba(13,19,32,0.3)] transition-all",
-          checked ? "left-[22px]" : "left-[2px]"
-        )}
-      />
-    </button>
   );
 }
 
